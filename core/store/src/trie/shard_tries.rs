@@ -15,7 +15,7 @@ use near_primitives::types::{
 use crate::trie::trie_storage::{TrieCache, TrieCachingStorage};
 use crate::trie::{TrieRefcountChange, POISONED_LOCK_ERR};
 use crate::{DBCol, DBOp, DBTransaction};
-use crate::{Store, StoreUpdate, Trie, TrieChanges, TrieUpdate};
+use crate::{Store, StoreUpdate, Temperature, Trie, TrieChanges, TrieUpdate};
 
 /// Responsible for creation of trie caches, stores necessary configuration for it.
 #[derive(Default)]
@@ -84,12 +84,22 @@ impl ShardTries {
         Arc::ptr_eq(&self.0, &other.0)
     }
 
-    pub fn new_trie_update(&self, shard_uid: ShardUId, state_root: CryptoHash) -> TrieUpdate {
-        TrieUpdate::new(Rc::new(self.get_trie_for_shard(shard_uid)), state_root)
+    pub fn new_trie_update(
+        &self,
+        temp: crate::Temperature,
+        shard_uid: ShardUId,
+        state_root: CryptoHash,
+    ) -> TrieUpdate {
+        TrieUpdate::new(Rc::new(self.get_trie_for_shard(shard_uid)), temp, state_root)
     }
 
-    pub fn new_trie_update_view(&self, shard_uid: ShardUId, state_root: CryptoHash) -> TrieUpdate {
-        TrieUpdate::new(Rc::new(self.get_view_trie_for_shard(shard_uid)), state_root)
+    pub fn new_trie_update_view(
+        &self,
+        temp: crate::Temperature,
+        shard_uid: ShardUId,
+        state_root: CryptoHash,
+    ) -> TrieUpdate {
+        TrieUpdate::new(Rc::new(self.get_view_trie_for_shard(shard_uid)), temp, state_root)
     }
 
     fn get_trie_for_shard_internal(&self, shard_uid: ShardUId, is_view: bool) -> Trie {
@@ -351,10 +361,11 @@ impl KeyForStateChanges {
     pub fn find_iter<'a>(
         &'a self,
         store: &'a Store,
+        temp: Temperature,
     ) -> impl Iterator<Item = Result<RawStateChangesWithTrieKey, std::io::Error>> + 'a {
         let prefix_len = Self::estimate_prefix_len();
         debug_assert!(self.0.len() >= prefix_len);
-        store.iter_prefix_ser::<RawStateChangesWithTrieKey>(DBCol::StateChanges, &self.0).map(
+        store.iter_prefix_ser::<RawStateChangesWithTrieKey>(temp, DBCol::StateChanges, &self.0).map(
             move |change| {
                 // Split off the irrelevant part of the key, so only the original trie_key is left.
                 let (key, state_changes) = change?;
@@ -367,10 +378,11 @@ impl KeyForStateChanges {
     pub fn find_exact_iter<'a>(
         &'a self,
         store: &'a Store,
+        temp: Temperature,
     ) -> impl Iterator<Item = Result<RawStateChangesWithTrieKey, std::io::Error>> + 'a {
         let prefix_len = Self::estimate_prefix_len();
         let trie_key_len = self.0.len() - prefix_len;
-        self.find_iter(store).filter_map(move |change| {
+        self.find_iter(store, temp).filter_map(move |change| {
             let state_changes = match change {
                 Ok(change) => change,
                 error => {

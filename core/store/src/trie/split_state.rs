@@ -27,16 +27,17 @@ impl Trie {
     /// StorageError if the storage is corrupted
     pub fn get_trie_items_for_part(
         &self,
+        temp: crate::Temperature,
         part_id: PartId,
         state_root: &StateRoot,
     ) -> Result<Vec<TrieItem>, StorageError> {
         assert!(self.storage.as_caching_storage().is_some());
 
         let path_begin =
-            self.find_path_for_part_boundary(state_root, part_id.idx, part_id.total)?;
+            self.find_path_for_part_boundary(temp, state_root, part_id.idx, part_id.total)?;
         let path_end =
-            self.find_path_for_part_boundary(state_root, part_id.idx + 1, part_id.total)?;
-        self.iter(state_root)?.get_trie_items(&path_begin, &path_end)
+            self.find_path_for_part_boundary(temp, state_root, part_id.idx + 1, part_id.total)?;
+        self.iter(temp, state_root)?.get_trie_items(&path_begin, &path_end)
     }
 }
 
@@ -49,11 +50,12 @@ impl ShardTries {
     /// from the original parent shard.
     pub fn apply_state_changes_to_split_states(
         &self,
+        temp: crate::Temperature,
         state_roots: &HashMap<ShardUId, StateRoot>,
         changes: StateChangesForSplitStates,
         account_id_to_shard_id: &dyn Fn(&AccountId) -> ShardUId,
     ) -> Result<HashMap<ShardUId, TrieChanges>, StorageError> {
-        let mut trie_updates: HashMap<_, _> = self.get_trie_updates(state_roots);
+        let mut trie_updates: HashMap<_, _> = self.get_trie_updates(temp, state_roots);
         let mut insert_receipts = Vec::new();
         for ConsolidatedStateChange { trie_key, value } in changes.changes {
             match &trie_key {
@@ -107,7 +109,7 @@ impl ShardTries {
 
         let mut trie_changes_map = HashMap::new();
         for (shard_uid, update) in trie_updates {
-            let (trie_changes, _) = update.finalize()?;
+            let (trie_changes, _) = update.finalize(temp)?;
             trie_changes_map.insert(shard_uid, trie_changes);
         }
         Ok(trie_changes_map)
@@ -121,11 +123,12 @@ impl ShardTries {
     /// Returns `store_update` and the new state_roots for split states
     pub fn add_values_to_split_states(
         &self,
+        temp: crate::Temperature,
         state_roots: &HashMap<ShardUId, StateRoot>,
         values: Vec<(Vec<u8>, Option<Vec<u8>>)>,
         account_id_to_shard_id: &dyn Fn(&AccountId) -> ShardUId,
     ) -> Result<(StoreUpdate, HashMap<ShardUId, StateRoot>), StorageError> {
-        self.add_values_to_split_states_impl(state_roots, values, &|raw_key| {
+        self.add_values_to_split_states_impl(temp, state_roots, values, &|raw_key| {
             // Here changes on DelayedReceipts or DelayedReceiptsIndices will be excluded
             // This is because we cannot migrate delayed receipts part by part. They have to be
             // reconstructed in the new states after all DelayedReceipts are ready in the original
@@ -144,6 +147,7 @@ impl ShardTries {
 
     fn add_values_to_split_states_impl(
         &self,
+        temp: crate::Temperature,
         state_roots: &HashMap<ShardUId, StateRoot>,
         values: Vec<(Vec<u8>, Option<Vec<u8>>)>,
         key_to_shard_id: &dyn Fn(&[u8]) -> Result<Option<ShardUId>, StorageError>,
@@ -159,7 +163,7 @@ impl ShardTries {
         for (shard_uid, changes) in changes_by_shard {
             let trie = self.get_trie_for_shard(shard_uid);
             // Here we assume that state_roots contains shard_uid, the caller of this method will guarantee that
-            let trie_changes = trie.update(&state_roots[&shard_uid], changes.into_iter())?;
+            let trie_changes = trie.update(temp, &state_roots[&shard_uid], changes.into_iter())?;
             let (update, state_root) = self.apply_all(&trie_changes, shard_uid);
             new_state_roots.insert(shard_uid, state_root);
             store_update.merge(update);
@@ -169,40 +173,43 @@ impl ShardTries {
 
     fn get_trie_updates(
         &self,
+        temp: crate::Temperature,
         state_roots: &HashMap<ShardUId, StateRoot>,
     ) -> HashMap<ShardUId, TrieUpdate> {
         state_roots
             .iter()
             .map(|(shard_uid, state_root)| {
-                (*shard_uid, self.new_trie_update(*shard_uid, *state_root))
+                (*shard_uid, self.new_trie_update(temp, *shard_uid, *state_root))
             })
             .collect()
     }
 
     pub fn apply_delayed_receipts_to_split_states(
         &self,
+        temp: crate::Temperature,
         state_roots: &HashMap<ShardUId, StateRoot>,
         receipts: &[Receipt],
         account_id_to_shard_id: &dyn Fn(&AccountId) -> ShardUId,
     ) -> Result<(StoreUpdate, HashMap<ShardUId, StateRoot>), StorageError> {
-        let mut trie_updates: HashMap<_, _> = self.get_trie_updates(state_roots);
+        let mut trie_updates: HashMap<_, _> = self.get_trie_updates(temp, state_roots);
         apply_delayed_receipts_to_split_states_impl(
             &mut trie_updates,
             receipts,
             &[],
             account_id_to_shard_id,
         )?;
-        self.finalize_and_apply_trie_updates(trie_updates)
+        self.finalize_and_apply_trie_updates(temp, trie_updates)
     }
 
     fn finalize_and_apply_trie_updates(
         &self,
+        temp: crate::Temperature,
         updates: HashMap<ShardUId, TrieUpdate>,
     ) -> Result<(StoreUpdate, HashMap<ShardUId, StateRoot>), StorageError> {
         let mut new_state_roots = HashMap::new();
         let mut merged_store_update = StoreUpdate::new_with_tries(self.clone());
         for (shard_uid, update) in updates {
-            let (trie_changes, _) = update.finalize()?;
+            let (trie_changes, _) = update.finalize(temp)?;
             let (store_update, state_root) = self.apply_all(&trie_changes, shard_uid);
             new_state_roots.insert(shard_uid, state_root);
             merged_store_update.merge(store_update);
@@ -355,7 +362,7 @@ mod tests {
         shard_uid: &ShardUId,
         state_root: &StateRoot,
     ) -> Vec<Receipt> {
-        let state_update = &tries.new_trie_update(*shard_uid, *state_root);
+        let state_update = &tries.new_trie_update(crate::Temperature::Hot, *shard_uid, *state_root);
         let mut delayed_receipt_indices = get_delayed_receipt_indices(state_update).unwrap();
 
         let mut receipts = vec![];
@@ -374,7 +381,7 @@ mod tests {
         state_root: &StateRoot,
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let trie = tries.get_trie_for_shard(*shard_uid);
-        trie.iter(state_root)
+        trie.iter(crate::Temperature::Hot, state_root)
             .unwrap()
             .map(Result::unwrap)
             .filter(|(key, _)| parse_account_id_from_raw_key(key).unwrap().is_some())
@@ -442,14 +449,20 @@ mod tests {
         expected_trie_items.sort();
 
         let trie = tries.get_trie_for_shard(ShardUId::single_shard());
-        let total_trie_items =
-            trie.get_trie_items_for_part(PartId::new(0, 1), &state_root).unwrap();
+        let total_trie_items = trie
+            .get_trie_items_for_part(crate::Temperature::Hot, PartId::new(0, 1), &state_root)
+            .unwrap();
         assert_eq!(expected_trie_items, total_trie_items);
 
         let mut combined_trie_items = vec![];
         for part_id in 0..num_parts {
-            let trie_items =
-                trie.get_trie_items_for_part(PartId::new(part_id, num_parts), &state_root).unwrap();
+            let trie_items = trie
+                .get_trie_items_for_part(
+                    crate::Temperature::Hot,
+                    PartId::new(part_id, num_parts),
+                    &state_root,
+                )
+                .unwrap();
             combined_trie_items.extend_from_slice(&trie_items);
             // check that items are split relatively evenly across all parts
             assert!(
@@ -489,23 +502,33 @@ mod tests {
                 );
 
                 let (store_update, new_state_roots) = tries
-                    .add_values_to_split_states_impl(&state_roots, changes, &|raw_key| {
-                        Ok(Some(ShardUId {
-                            version: 1,
-                            shard_id: (hash(raw_key).0[0] as NumShards % num_shards) as u32,
-                        }))
-                    })
+                    .add_values_to_split_states_impl(
+                        crate::Temperature::Hot,
+                        &state_roots,
+                        changes,
+                        &|raw_key| {
+                            Ok(Some(ShardUId {
+                                version: 1,
+                                shard_id: (hash(raw_key).0[0] as NumShards % num_shards) as u32,
+                            }))
+                        },
+                    )
                     .unwrap();
                 store_update.commit().unwrap();
                 state_roots = new_state_roots;
 
                 // check that the 4 tries combined to the orig trie
-                let trie_items: HashMap<_, _> =
-                    trie.iter(&state_root).unwrap().map(Result::unwrap).collect();
+                let trie_items: HashMap<_, _> = trie
+                    .iter(crate::Temperature::Hot, &state_root)
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .collect();
                 let mut combined_trie_items: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
                 state_roots.iter().for_each(|(shard_uid, state_root)| {
                     let trie = tries.get_view_trie_for_shard(*shard_uid);
-                    combined_trie_items.extend(trie.iter(state_root).unwrap().map(Result::unwrap));
+                    combined_trie_items.extend(
+                        trie.iter(crate::Temperature::Hot, state_root).unwrap().map(Result::unwrap),
+                    );
                 });
                 assert_eq!(trie_items, combined_trie_items);
             }
@@ -521,8 +544,11 @@ mod tests {
 
             // push receipt to trie
             let tries = create_tries();
-            let mut trie_update =
-                tries.new_trie_update(ShardUId::single_shard(), StateRoot::default());
+            let mut trie_update = tries.new_trie_update(
+                crate::Temperature::Hot,
+                ShardUId::single_shard(),
+                StateRoot::default(),
+            );
             let mut delayed_receipt_indices = DelayedReceiptIndices::default();
 
             for (i, receipt) in all_receipts.iter().enumerate() {
@@ -531,7 +557,7 @@ mod tests {
             delayed_receipt_indices.next_available_index = all_receipts.len() as u64;
             set(&mut trie_update, TrieKey::DelayedReceiptIndices, &delayed_receipt_indices);
             trie_update.commit(StateChangeCause::Resharding);
-            let (trie_changes, _) = trie_update.finalize().unwrap();
+            let (trie_changes, _) = trie_update.finalize(crate::Temperature::Hot).unwrap();
             let (store_update, state_root) =
                 tries.apply_all(&trie_changes, ShardUId::single_shard());
             store_update.commit().unwrap();
@@ -542,7 +568,11 @@ mod tests {
             );
             let mut start_index = 0;
 
-            let trie_update = tries.new_trie_update(ShardUId::single_shard(), state_root);
+            let trie_update = tries.new_trie_update(
+                crate::Temperature::Hot,
+                ShardUId::single_shard(),
+                state_root,
+            );
             while let Some((next_index, receipts)) =
                 get_delayed_receipts(&trie_update, Some(start_index), memory_limit).unwrap()
             {
@@ -573,7 +603,8 @@ mod tests {
         state_roots: HashMap<ShardUId, StateRoot>,
         account_id_to_shard_id: &dyn Fn(&AccountId) -> ShardUId,
     ) -> HashMap<ShardUId, StateRoot> {
-        let mut trie_updates: HashMap<_, _> = tries.get_trie_updates(&state_roots);
+        let mut trie_updates: HashMap<_, _> =
+            tries.get_trie_updates(crate::Temperature::Hot, &state_roots);
         apply_delayed_receipts_to_split_states_impl(
             &mut trie_updates,
             new_receipts,
@@ -582,7 +613,7 @@ mod tests {
         )
         .unwrap();
         let (state_update, new_state_roots) =
-            tries.finalize_and_apply_trie_updates(trie_updates).unwrap();
+            tries.finalize_and_apply_trie_updates(crate::Temperature::Hot, trie_updates).unwrap();
         state_update.commit().unwrap();
 
         let receipts_by_shard: HashMap<_, _> = new_state_roots
@@ -643,8 +674,11 @@ mod tests {
         let tries = create_tries();
         // add accounts and receipts to state
         let mut account_ids = gen_unique_accounts(rng, 100);
-        let mut trie_update =
-            tries.new_trie_update(ShardUId::single_shard(), CryptoHash::default());
+        let mut trie_update = tries.new_trie_update(
+            crate::Temperature::Hot,
+            ShardUId::single_shard(),
+            CryptoHash::default(),
+        );
         for account_id in account_ids.iter() {
             set_account(
                 &mut trie_update,
@@ -667,7 +701,7 @@ mod tests {
                 },
             );
             trie_update.commit(StateChangeCause::Resharding);
-            let (trie_changes, _) = trie_update.finalize().unwrap();
+            let (trie_changes, _) = trie_update.finalize(crate::Temperature::Hot).unwrap();
             let (store_update, state_root) =
                 tries.apply_all(&trie_changes, ShardUId::single_shard());
             store_update.commit().unwrap();
@@ -684,7 +718,7 @@ mod tests {
         let mut split_state_roots = {
             let trie_items = tries
                 .get_view_trie_for_shard(ShardUId::single_shard())
-                .get_trie_items_for_part(PartId::new(0, 1), &state_root)
+                .get_trie_items_for_part(crate::Temperature::Hot, PartId::new(0, 1), &state_root)
                 .unwrap();
             let split_state_roots: HashMap<_, _> = (0..num_shards)
                 .map(|shard_id| {
@@ -693,6 +727,7 @@ mod tests {
                 .collect();
             let (store_update, split_state_roots) = tries
                 .add_values_to_split_states(
+                    crate::Temperature::Hot,
                     &split_state_roots,
                     trie_items.into_iter().map(|(key, value)| (key, Some(value))).collect(),
                     account_id_to_shard_id,
@@ -701,6 +736,7 @@ mod tests {
             store_update.commit().unwrap();
             let (store_update, split_state_roots) = tries
                 .apply_delayed_receipts_to_split_states(
+                    crate::Temperature::Hot,
                     &split_state_roots,
                     &get_all_delayed_receipts(&tries, &ShardUId::single_shard(), &state_root),
                     account_id_to_shard_id,
@@ -720,7 +756,11 @@ mod tests {
         for _ in 0..10 {
             // add accounts
             let new_accounts = gen_unique_accounts(rng, 10);
-            let mut trie_update = tries.new_trie_update(ShardUId::single_shard(), state_root);
+            let mut trie_update = tries.new_trie_update(
+                crate::Temperature::Hot,
+                ShardUId::single_shard(),
+                state_root,
+            );
             for account_id in new_accounts.iter() {
                 set_account(
                     &mut trie_update,
@@ -770,7 +810,8 @@ mod tests {
             );
             set(&mut trie_update, TrieKey::DelayedReceiptIndices, &delayed_receipt_indices);
             trie_update.commit(StateChangeCause::Resharding);
-            let (trie_changes, state_changes) = trie_update.finalize().unwrap();
+            let (trie_changes, state_changes) =
+                trie_update.finalize(crate::Temperature::Hot).unwrap();
             let (store_update, new_state_root) =
                 tries.apply_all(&trie_changes, ShardUId::single_shard());
             store_update.commit().unwrap();
@@ -779,6 +820,7 @@ mod tests {
             // update split states
             let trie_changes = tries
                 .apply_state_changes_to_split_states(
+                    crate::Temperature::Hot,
                     &split_state_roots,
                     StateChangesForSplitStates::from_raw_state_changes(
                         &state_changes,

@@ -70,7 +70,7 @@ where
     F: Fn(T) -> U,
 {
     let mut store_update = BatchedStoreUpdate::new(store, 10_000_000);
-    for (key, value) in store.iter(col).map(Result::unwrap) {
+    for (key, value) in store.iter(crate::Temperature::Hot, col).map(Result::unwrap) {
         let new_value = f(T::try_from_slice(&value).unwrap());
         store_update.set_ser(col, &key, &new_value)?;
     }
@@ -146,11 +146,13 @@ pub fn migrate_29_to_30(store_opener: &StoreOpener) {
     // values (EpochInfoAggregator), so we cannot use `map_col` on it. We need to handle
     // the AGGREGATOR_KEY differently from all others.
     let col = DBCol::EpochInfo;
-    let keys: Vec<_> = store.iter(col).map(Result::unwrap).map(|(key, _)| key).collect();
+    let keys: Vec<_> =
+        store.iter(crate::Temperature::Hot, col).map(Result::unwrap).map(|(key, _)| key).collect();
     let mut store_update = BatchedStoreUpdate::new(&store, 10_000_000);
     for key in keys {
         if key.as_ref() == AGGREGATOR_KEY {
-            let value: OldEpochInfoAggregator = store.get_ser(col, key.as_ref()).unwrap().unwrap();
+            let value: OldEpochInfoAggregator =
+                store.get_ser(crate::Temperature::Hot, col, key.as_ref()).unwrap().unwrap();
             let new_value = NewEpochInfoAggregator {
                 block_tracker: value.block_tracker,
                 shard_tracker: value.shard_tracker,
@@ -165,7 +167,8 @@ pub fn migrate_29_to_30(store_opener: &StoreOpener) {
             };
             store_update.set_ser(col, key.as_ref(), &new_value).unwrap();
         } else {
-            let value: EpochInfoV1 = store.get_ser(col, key.as_ref()).unwrap().unwrap();
+            let value: EpochInfoV1 =
+                store.get_ser(crate::Temperature::Hot, col, key.as_ref()).unwrap().unwrap();
             let new_value = EpochInfo::V1(value);
             store_update.set_ser(col, key.as_ref(), &new_value).unwrap();
         }

@@ -62,7 +62,11 @@ pub trait TrieStorage {
     /// Get bytes of a serialized TrieNode.
     /// # Errors
     /// StorageError if the storage fails internally or the hash is not present.
-    fn retrieve_raw_bytes(&self, hash: &CryptoHash) -> Result<Arc<[u8]>, StorageError>;
+    fn retrieve_raw_bytes(
+        &self,
+        temp: crate::Temperature,
+        hash: &CryptoHash,
+    ) -> Result<Arc<[u8]>, StorageError>;
 
     fn as_caching_storage(&self) -> Option<&TrieCachingStorage> {
         None
@@ -89,14 +93,18 @@ pub struct TrieRecordingStorage {
 }
 
 impl TrieStorage for TrieRecordingStorage {
-    fn retrieve_raw_bytes(&self, hash: &CryptoHash) -> Result<Arc<[u8]>, StorageError> {
+    fn retrieve_raw_bytes(
+        &self,
+        temp: crate::Temperature,
+        hash: &CryptoHash,
+    ) -> Result<Arc<[u8]>, StorageError> {
         if let Some(val) = self.recorded.borrow().get(hash) {
             return Ok(val.as_slice().into());
         }
         let key = TrieCachingStorage::get_key_from_shard_uid_and_hash(self.shard_uid, hash);
         let val = self
             .store
-            .get(DBCol::State, key.as_ref())
+            .get(temp, DBCol::State, key.as_ref())
             .map_err(|_| StorageError::StorageInternalError)?;
         if let Some(val) = val {
             self.recorded.borrow_mut().insert(*hash, val.clone());
@@ -123,7 +131,11 @@ pub struct TrieMemoryPartialStorage {
 }
 
 impl TrieStorage for TrieMemoryPartialStorage {
-    fn retrieve_raw_bytes(&self, hash: &CryptoHash) -> Result<Arc<[u8]>, StorageError> {
+    fn retrieve_raw_bytes(
+        &self,
+        _temp: crate::Temperature,
+        hash: &CryptoHash,
+    ) -> Result<Arc<[u8]>, StorageError> {
         let result = self
             .recorded_storage
             .get(hash)
@@ -230,7 +242,11 @@ impl TrieCachingStorage {
 }
 
 impl TrieStorage for TrieCachingStorage {
-    fn retrieve_raw_bytes(&self, hash: &CryptoHash) -> Result<Arc<[u8]>, StorageError> {
+    fn retrieve_raw_bytes(
+        &self,
+        temp: crate::Temperature,
+        hash: &CryptoHash,
+    ) -> Result<Arc<[u8]>, StorageError> {
         // Try to get value from chunk cache containing nodes with cheaper access. We can do it for any `TrieCacheMode`,
         // because we charge for reading nodes only when `CachingChunk` mode is enabled anyway.
         if let Some(val) = self.chunk_cache.borrow_mut().get(hash) {
@@ -251,7 +267,7 @@ impl TrieStorage for TrieCachingStorage {
                 let key = Self::get_key_from_shard_uid_and_hash(self.shard_uid, hash);
                 let val = self
                     .store
-                    .get(DBCol::State, key.as_ref())
+                    .get(temp, DBCol::State, key.as_ref())
                     .map_err(|_| StorageError::StorageInternalError)?
                     .ok_or_else(|| {
                         StorageError::StorageInconsistentState("Trie node missing".to_string())

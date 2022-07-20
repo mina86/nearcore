@@ -51,6 +51,11 @@ pub struct Store {
     storage: Arc<dyn Database>,
 }
 
+#[derive(Clone, Copy)]
+pub enum Temperature {
+    Hot,
+}
+
 impl Store {
     /// Initialises a new opener with given home directory and store config.
     pub fn opener<'a>(home_dir: &std::path::Path, config: &'a StoreConfig) -> StoreOpener<'a> {
@@ -80,7 +85,12 @@ impl Store {
         self.storage
     }
 
-    pub fn get(&self, column: DBCol, key: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    pub fn get(
+        &self,
+        _temp: Temperature,
+        column: DBCol,
+        key: &[u8],
+    ) -> io::Result<Option<Vec<u8>>> {
         let value = self
             .storage
             .get_raw_bytes(column, key)
@@ -95,22 +105,27 @@ impl Store {
         Ok(value)
     }
 
-    pub fn get_ser<T: BorshDeserialize>(&self, column: DBCol, key: &[u8]) -> io::Result<Option<T>> {
-        match self.get(column, key)? {
+    pub fn get_ser<T: BorshDeserialize>(
+        &self,
+        temp: Temperature,
+        column: DBCol,
+        key: &[u8],
+    ) -> io::Result<Option<T>> {
+        match self.get(temp, column, key)? {
             Some(bytes) => Ok(Some(T::try_from_slice(&bytes)?)),
             None => Ok(None),
         }
     }
 
-    pub fn exists(&self, column: DBCol, key: &[u8]) -> io::Result<bool> {
-        self.get(column, key).map(|value| value.is_some())
+    pub fn exists(&self, temp: Temperature, column: DBCol, key: &[u8]) -> io::Result<bool> {
+        self.get(temp, column, key).map(|value| value.is_some())
     }
 
     pub fn store_update(&self) -> StoreUpdate {
         StoreUpdate::new(Arc::clone(&self.storage))
     }
 
-    pub fn iter<'a>(&'a self, column: DBCol) -> DBIterator<'a> {
+    pub fn iter<'a>(&'a self, _temp: Temperature, column: DBCol) -> DBIterator<'a> {
         self.storage.iter(column)
     }
 
@@ -120,16 +135,22 @@ impl Store {
     /// This method is a deliberate escape hatch, and shouldn't be used outside
     /// of auxilary code like migrations which wants to hack on the database
     /// directly.
-    pub fn iter_raw_bytes<'a>(&'a self, column: DBCol) -> DBIterator<'a> {
+    pub fn iter_raw_bytes<'a>(&'a self, _temp: Temperature, column: DBCol) -> DBIterator<'a> {
         self.storage.iter_raw_bytes(column)
     }
 
-    pub fn iter_prefix<'a>(&'a self, column: DBCol, key_prefix: &'a [u8]) -> DBIterator<'a> {
+    pub fn iter_prefix<'a>(
+        &'a self,
+        _temp: Temperature,
+        column: DBCol,
+        key_prefix: &'a [u8],
+    ) -> DBIterator<'a> {
         self.storage.iter_prefix(column, key_prefix)
     }
 
     pub fn iter_prefix_ser<'a, T: BorshDeserialize>(
         &'a self,
+        _temp: Temperature,
         column: DBCol,
         key_prefix: &'a [u8],
     ) -> impl Iterator<Item = io::Result<(Box<[u8]>, T)>> + 'a {
@@ -604,16 +625,16 @@ pub fn remove_account(
 }
 
 pub fn get_genesis_state_roots(store: &Store) -> io::Result<Option<Vec<StateRoot>>> {
-    store.get_ser::<Vec<StateRoot>>(DBCol::BlockMisc, GENESIS_STATE_ROOTS_KEY)
+    store.get_ser(crate::Temperature::Hot, DBCol::BlockMisc, GENESIS_STATE_ROOTS_KEY)
 }
 
 pub fn get_genesis_hash(store: &Store) -> io::Result<Option<CryptoHash>> {
-    store.get_ser::<CryptoHash>(DBCol::BlockMisc, GENESIS_JSON_HASH_KEY)
+    store.get_ser(crate::Temperature::Hot, DBCol::BlockMisc, GENESIS_JSON_HASH_KEY)
 }
 
 pub fn set_genesis_hash(store_update: &mut StoreUpdate, genesis_hash: &CryptoHash) {
     store_update
-        .set_ser::<CryptoHash>(DBCol::BlockMisc, GENESIS_JSON_HASH_KEY, genesis_hash)
+        .set_ser(DBCol::BlockMisc, GENESIS_JSON_HASH_KEY, genesis_hash)
         .expect("Borsh cannot fail");
 }
 
@@ -639,7 +660,7 @@ impl CompiledContractCache for StoreCompiledContractCache {
     }
 
     fn get(&self, key: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        self.store.get(DBCol::CachedContractCode, key)
+        self.store.get(crate::Temperature::Hot, DBCol::CachedContractCode, key)
     }
 }
 
@@ -654,7 +675,7 @@ mod tests {
     }
 
     fn test_clear_column(store: Store) {
-        assert_eq!(store.get(DBCol::State, &[1]).unwrap(), None);
+        assert_eq!(store.get(crate::Temperature::Hot, DBCol::State, &[1]).unwrap(), None);
         {
             let mut store_update = store.store_update();
             store_update.increment_refcount(DBCol::State, &[1], &[1]);
@@ -662,13 +683,13 @@ mod tests {
             store_update.increment_refcount(DBCol::State, &[3], &[3]);
             store_update.commit().unwrap();
         }
-        assert_eq!(store.get(DBCol::State, &[1]).unwrap(), Some(vec![1]));
+        assert_eq!(store.get(crate::Temperature::Hot, DBCol::State, &[1]).unwrap(), Some(vec![1]));
         {
             let mut store_update = store.store_update();
             store_update.delete_all(DBCol::State);
             store_update.commit().unwrap();
         }
-        assert_eq!(store.get(DBCol::State, &[1]).unwrap(), None);
+        assert_eq!(store.get(crate::Temperature::Hot, DBCol::State, &[1]).unwrap(), None);
     }
 
     #[test]
@@ -725,13 +746,19 @@ mod tests {
         }
 
         // Check that full scan produces keys in proper order.
-        assert_sorted(PREFIXES.len() * COUNT, collect(store.iter(COLUMN)));
-        assert_sorted(PREFIXES.len() * COUNT, collect(store.iter_raw_bytes(COLUMN)));
-        assert_sorted(PREFIXES.len() * COUNT, collect(store.iter_prefix(COLUMN, b"")));
+        assert_sorted(PREFIXES.len() * COUNT, collect(store.iter(crate::Temperature::Hot, COLUMN)));
+        assert_sorted(
+            PREFIXES.len() * COUNT,
+            collect(store.iter_raw_bytes(crate::Temperature::Hot, COLUMN)),
+        );
+        assert_sorted(
+            PREFIXES.len() * COUNT,
+            collect(store.iter_prefix(crate::Temperature::Hot, COLUMN, b"")),
+        );
 
         // Check that prefix scan produces keys in proper order.
         for prefix in PREFIXES.iter() {
-            let keys = collect(store.iter_prefix(COLUMN, prefix));
+            let keys = collect(store.iter_prefix(crate::Temperature::Hot, COLUMN, prefix));
             for (pos, key) in keys.iter().enumerate() {
                 assert_eq!(
                     prefix,

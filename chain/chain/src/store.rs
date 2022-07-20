@@ -34,9 +34,9 @@ use near_primitives::types::{
 use near_primitives::utils::{get_block_shard_id, index_to_bytes, to_timestamp};
 use near_primitives::views::LightClientBlockView;
 use near_store::{
-    DBCol, KeyForStateChanges, ShardTries, Store, StoreUpdate, WrappedTrieChanges, CHUNK_TAIL_KEY,
-    FINAL_HEAD_KEY, FORK_TAIL_KEY, HEADER_HEAD_KEY, HEAD_KEY, LARGEST_TARGET_HEIGHT_KEY,
-    LATEST_KNOWN_KEY, TAIL_KEY,
+    DBCol, KeyForStateChanges, ShardTries, Store, StoreUpdate, Temperature, WrappedTrieChanges,
+    CHUNK_TAIL_KEY, FINAL_HEAD_KEY, FORK_TAIL_KEY, HEADER_HEAD_KEY, HEAD_KEY,
+    LARGEST_TARGET_HEIGHT_KEY, LATEST_KNOWN_KEY, TAIL_KEY,
 };
 
 use crate::types::{Block, BlockHeader, LatestKnown};
@@ -315,6 +315,7 @@ pub trait ChainStoreAccess {
 /// All chain-related database operations.
 pub struct ChainStore {
     store: Store,
+    temp: Temperature,
     /// Genesis block height.
     genesis_height: BlockHeight,
     /// Latest known.
@@ -442,7 +443,7 @@ impl ChainStore {
     ) -> Result<StateChangesForSplitStates, Error> {
         let key = &get_block_shard_id(block_hash, shard_id);
         option_to_not_found(
-            self.store.get_ser(DBCol::StateChangesForSplitStates, key),
+            self.store.get_ser(self.temp, DBCol::StateChangesForSplitStates, key),
             format_args!("CONSOLIDATED STATE CHANGES: {}:{}", block_hash, shard_id),
         )
     }
@@ -574,7 +575,10 @@ impl ChainStore {
         &self,
         id: &CryptoHash,
     ) -> Result<Vec<ExecutionOutcomeWithIdAndProof>, Error> {
-        Ok(self.store.get_ser(DBCol::TransactionResult, id.as_ref())?.unwrap_or_else(|| vec![]))
+        Ok(self
+            .store
+            .get_ser(self.temp, DBCol::TransactionResult, id.as_ref())?
+            .unwrap_or_else(|| vec![]))
     }
 
     /// Returns a vector of Outcome ids for given block and shard id
@@ -585,23 +589,25 @@ impl ChainStore {
     ) -> Result<Vec<CryptoHash>, Error> {
         Ok(self
             .store
-            .get_ser(DBCol::OutcomeIds, &get_block_shard_id(block_hash, shard_id))?
+            .get_ser(self.temp, DBCol::OutcomeIds, &get_block_shard_id(block_hash, shard_id))?
             .unwrap_or_default())
     }
 
     /// Returns a hashmap of epoch id -> set of all blocks got for current (height, epoch_id)
     pub fn get_all_block_hashes_by_height(
         &self,
+
         height: BlockHeight,
     ) -> Result<Arc<HashMap<EpochId, HashSet<CryptoHash>>>, Error> {
-        option_to_not_found(
-            self.read_with_cache(
+        let result = match self.temp {
+            Temperature::Hot => self.read_with_cache(
                 DBCol::BlockPerHeight,
                 &self.block_hash_per_height,
                 &index_to_bytes(height),
             ),
-            format_args!("BLOCK PER HEIGHT: {}", height),
-        )
+            // Temperature::Cold => read single block from BlockHeight
+        };
+        option_to_not_found(result, format_args!("BLOCK PER HEIGHT: {}", height))
     }
 
     /// Returns a HashSet of Chunk Hashes for current Height
@@ -611,7 +617,7 @@ impl ChainStore {
     ) -> Result<HashSet<ChunkHash>, Error> {
         Ok(self
             .store
-            .get_ser(DBCol::ChunkHashesByHeight, &index_to_bytes(height))?
+            .get_ser(self.temp, DBCol::ChunkHashesByHeight, &index_to_bytes(height))?
             .unwrap_or_default())
     }
 
@@ -622,7 +628,7 @@ impl ChainStore {
     ) -> Result<HashSet<CryptoHash>, Error> {
         Ok(self
             .store
-            .get_ser(DBCol::HeaderHashesByHeight, &index_to_bytes(height))?
+            .get_ser(self.temp, DBCol::HeaderHashesByHeight, &index_to_bytes(height))?
             .unwrap_or_default())
     }
 
@@ -632,7 +638,7 @@ impl ChainStore {
         block_hash: CryptoHash,
     ) -> Result<ShardStateSyncResponseHeader, Error> {
         let key = StateHeaderKey(shard_id, block_hash).try_to_vec()?;
-        match self.store.get_ser(DBCol::StateHeaders, &key) {
+        match self.store.get_ser(self.temp, DBCol::StateHeaders, &key) {
             Ok(Some(header)) => Ok(header),
             _ => Err(Error::Other("Cannot get shard_state_header".into())),
         }
@@ -643,7 +649,7 @@ impl ChainStore {
         self.latest_known
             .get_or_try_init(|| {
                 option_to_not_found(
-                    self.store.get_ser(DBCol::BlockMisc, LATEST_KNOWN_KEY),
+                    self.store.get_ser(self.temp, DBCol::BlockMisc, LATEST_KNOWN_KEY),
                     "LATEST_KNOWN_KEY",
                 )
             })
@@ -681,7 +687,7 @@ impl ChainStore {
 
         let storage_key = KeyForStateChanges::for_block(block_hash);
 
-        let mut block_changes = storage_key.find_iter(&self.store);
+        let mut block_changes = storage_key.find_iter(self.temp, &self.store);
 
         Ok(StateChangesKinds::from_changes(&mut block_changes)?)
     }
@@ -692,7 +698,7 @@ impl ChainStore {
     ) -> Result<StateChanges, Error> {
         let storage_key = KeyForStateChanges::for_block(block_hash);
 
-        let mut block_changes = storage_key.find_iter(&self.store);
+        let mut block_changes = storage_key.find_iter(self.temp, &self.store);
 
         Ok(StateChanges::from_changes(&mut block_changes)?)
     }
@@ -735,7 +741,7 @@ impl ChainStore {
                 for account_id in account_ids {
                     let data_key = TrieKey::Account { account_id: account_id.clone() };
                     let storage_key = KeyForStateChanges::from_trie_key(block_hash, &data_key);
-                    let changes_per_key = storage_key.find_exact_iter(&self.store);
+                    let changes_per_key = storage_key.find_exact_iter(self.temp, &self.store);
                     changes.extend(StateChanges::from_account_changes(changes_per_key)?);
                 }
                 changes
@@ -748,7 +754,7 @@ impl ChainStore {
                         public_key: key.public_key.clone(),
                     };
                     let storage_key = KeyForStateChanges::from_trie_key(block_hash, &data_key);
-                    let changes_per_key = storage_key.find_exact_iter(&self.store);
+                    let changes_per_key = storage_key.find_exact_iter(self.temp, &self.store);
                     changes.extend(StateChanges::from_access_key_changes(changes_per_key)?);
                 }
                 changes
@@ -758,7 +764,7 @@ impl ChainStore {
                 for account_id in account_ids {
                     let data_key = trie_key_parsers::get_raw_prefix_for_access_keys(account_id);
                     let storage_key = KeyForStateChanges::from_raw_key(block_hash, &data_key);
-                    let changes_per_key_prefix = storage_key.find_iter(&self.store);
+                    let changes_per_key_prefix = storage_key.find_iter(self.temp, &self.store);
                     changes.extend(StateChanges::from_access_key_changes(changes_per_key_prefix)?);
                 }
                 changes
@@ -768,7 +774,7 @@ impl ChainStore {
                 for account_id in account_ids {
                     let data_key = TrieKey::ContractCode { account_id: account_id.clone() };
                     let storage_key = KeyForStateChanges::from_trie_key(block_hash, &data_key);
-                    let changes_per_key = storage_key.find_exact_iter(&self.store);
+                    let changes_per_key = storage_key.find_exact_iter(self.temp, &self.store);
                     changes.extend(StateChanges::from_contract_code_changes(changes_per_key)?);
                 }
                 changes
@@ -781,7 +787,7 @@ impl ChainStore {
                         key_prefix.as_ref(),
                     );
                     let storage_key = KeyForStateChanges::from_raw_key(block_hash, &data_key);
-                    let changes_per_key_prefix = storage_key.find_iter(&self.store);
+                    let changes_per_key_prefix = storage_key.find_iter(self.temp, &self.store);
                     changes.extend(StateChanges::from_data_changes(changes_per_key_prefix)?);
                 }
                 changes
@@ -799,14 +805,33 @@ impl ChainStore {
         cache: &'a CellLruCache<Vec<u8>, T>,
         key: &[u8],
     ) -> io::Result<Option<T>> {
+        self.read_with_cache_impl(self.temp, col, cache, key)
+    }
+
+    fn read_hot_with_cache<'a, T: BorshDeserialize + Clone + 'a>(
+        &self,
+        col: DBCol,
+        cache: &'a CellLruCache<Vec<u8>, T>,
+        key: &[u8],
+    ) -> io::Result<Option<T>> {
+        self.read_with_cache_impl(Temperature::Hot, col, cache, key)
+    }
+
+    fn read_with_cache_impl<'a, T: BorshDeserialize + Clone + 'a>(
+        &self,
+        temp: Temperature,
+        col: DBCol,
+        cache: &'a CellLruCache<Vec<u8>, T>,
+        key: &[u8],
+    ) -> io::Result<Option<T>> {
         if let Some(value) = cache.get(key) {
-            return Ok(Some(value));
-        }
-        if let Some(result) = self.store.get_ser::<T>(col, key)? {
+            Ok(Some(value))
+        } else if let Some(value) = self.store.get_ser(temp, col, key)? {
             cache.put(key.to_vec(), result.clone());
-            return Ok(Some(result));
+            Ok(Some(value))
+        } else {
+            Ok(None)
         }
-        Ok(None)
     }
 }
 
@@ -819,7 +844,7 @@ impl ChainStoreAccess for ChainStore {
         if let Some(ref tip) = self.head {
             Ok(tip.clone())
         } else {
-            option_to_not_found(self.store.get_ser(DBCol::BlockMisc, HEAD_KEY), "HEAD")
+            option_to_not_found(self.store.get_ser(self.temp, DBCol::BlockMisc, HEAD_KEY), "HEAD")
         }
     }
 
@@ -829,7 +854,7 @@ impl ChainStoreAccess for ChainStore {
             Ok(*tail)
         } else {
             self.store
-                .get_ser(DBCol::BlockMisc, TAIL_KEY)
+                .get_ser(self.temp, DBCol::BlockMisc, TAIL_KEY)
                 .map(|option| option.unwrap_or_else(|| self.genesis_height))
                 .map_err(|e| e.into())
         }
@@ -838,14 +863,14 @@ impl ChainStoreAccess for ChainStore {
     /// The chain Chunks Tail height, used by GC.
     fn chunk_tail(&self) -> Result<BlockHeight, Error> {
         self.store
-            .get_ser(DBCol::BlockMisc, CHUNK_TAIL_KEY)
+            .get_ser(self.temp, DBCol::BlockMisc, CHUNK_TAIL_KEY)
             .map(|option| option.unwrap_or_else(|| self.genesis_height))
             .map_err(|e| e.into())
     }
 
     fn fork_tail(&self) -> Result<BlockHeight, Error> {
         self.store
-            .get_ser(DBCol::BlockMisc, FORK_TAIL_KEY)
+            .get_ser(self.temp, DBCol::BlockMisc, FORK_TAIL_KEY)
             .map(|option| option.unwrap_or_else(|| self.genesis_height))
             .map_err(|e| e.into())
     }
@@ -857,7 +882,7 @@ impl ChainStoreAccess for ChainStore {
 
     /// Largest height for which we created a doomslug endorsement
     fn largest_target_height(&self) -> Result<BlockHeight, Error> {
-        match self.store.get_ser(DBCol::BlockMisc, LARGEST_TARGET_HEIGHT_KEY) {
+        match self.store.get_ser(self.temp, DBCol::BlockMisc, LARGEST_TARGET_HEIGHT_KEY) {
             Ok(Some(o)) => Ok(o),
             Ok(None) => Ok(0),
             Err(e) => Err(e.into()),
@@ -866,18 +891,24 @@ impl ChainStoreAccess for ChainStore {
 
     /// Head of the header chain (not the same thing as head_header).
     fn header_head(&self) -> Result<Tip, Error> {
-        option_to_not_found(self.store.get_ser(DBCol::BlockMisc, HEADER_HEAD_KEY), "HEADER_HEAD")
+        option_to_not_found(
+            self.store.get_ser(self.temp, DBCol::BlockMisc, HEADER_HEAD_KEY),
+            "HEADER_HEAD",
+        )
     }
 
     /// Final head of the chain.
     fn final_head(&self) -> Result<Tip, Error> {
-        option_to_not_found(self.store.get_ser(DBCol::BlockMisc, FINAL_HEAD_KEY), "FINAL HEAD")
+        option_to_not_found(
+            self.store.get_ser(self.temp, DBCol::BlockMisc, FINAL_HEAD_KEY),
+            "FINAL HEAD",
+        )
     }
 
     /// Get full block.
-    fn get_block(&self, h: &CryptoHash) -> Result<Block, Error> {
+    fn get_block(&self, block_hash: &CryptoHash) -> Result<Block, Error> {
         option_to_not_found(
-            self.read_with_cache(DBCol::Block, &self.blocks, h.as_ref()),
+            self.read_with_cache(DBCol::Block, &self.blocks, block_hash.as_ref()),
             format_args!("BLOCK: {}", h),
         )
     }
@@ -900,12 +931,12 @@ impl ChainStoreAccess for ChainStore {
     }
 
     /// Does this full block exist?
-    fn block_exists(&self, h: &CryptoHash) -> Result<bool, Error> {
-        self.store.exists(DBCol::Block, h.as_ref()).map_err(|e| e.into())
+    fn block_exists(&self, block_hash: &CryptoHash) -> Result<bool, Error> {
+        self.store.exists(self.temp, DBCol::Block, block_hash.as_ref()).map_err(|e| e.into())
     }
 
-    fn chunk_exists(&self, h: &ChunkHash) -> Result<bool, Error> {
-        self.store.exists(DBCol::Chunks, h.as_ref()).map_err(|e| e.into())
+    fn chunk_exists(&self, chunk_hash: &ChunkHash) -> Result<bool, Error> {
+        self.store.exists(self.temp, DBCol::Chunks, chunk_hash.as_ref()).map_err(|e| e.into())
     }
 
     /// Get previous header.
@@ -924,6 +955,7 @@ impl ChainStoreAccess for ChainStore {
     /// Information from applying chunk.
     fn get_chunk_extra(
         &self,
+
         block_hash: &CryptoHash,
         shard_uid: &ShardUId,
     ) -> Result<Arc<ChunkExtra>, Error> {
@@ -940,7 +972,7 @@ impl ChainStoreAccess for ChainStore {
     /// Get block header.
     fn get_block_header(&self, h: &CryptoHash) -> Result<BlockHeader, Error> {
         option_to_not_found(
-            self.read_with_cache(DBCol::BlockHeader, &self.headers, h.as_ref()),
+            self.read_hot_with_cache(DBCol::BlockHeader, &self.headers, h.as_ref()),
             format_args!("BLOCK HEADER: {}", h),
         )
     }
@@ -948,7 +980,7 @@ impl ChainStoreAccess for ChainStore {
     /// Returns hash of the block on the main chain for given height.
     fn get_block_hash_by_height(&self, height: BlockHeight) -> Result<CryptoHash, Error> {
         option_to_not_found(
-            self.store.get_ser(DBCol::BlockHeight, &index_to_bytes(height)),
+            self.store.get_ser(Temperature::Hot, DBCol::BlockHeight, &index_to_bytes(height)),
             format_args!("BLOCK HEIGHT: {}", height),
         )
         // TODO: cache needs to be deleted when things get updated.
@@ -971,6 +1003,7 @@ impl ChainStoreAccess for ChainStore {
 
     fn get_epoch_light_client_block(
         &self,
+
         hash: &CryptoHash,
     ) -> Result<Arc<LightClientBlockView>, Error> {
         option_to_not_found(
@@ -985,13 +1018,18 @@ impl ChainStoreAccess for ChainStore {
 
     fn get_block_refcount(&self, block_hash: &CryptoHash) -> Result<u64, Error> {
         option_to_not_found(
-            self.read_with_cache(DBCol::BlockRefCount, &self.block_refcounts, block_hash.as_ref()),
+            self.read_hot_with_cache(
+                DBCol::BlockRefCount,
+                &self.block_refcounts,
+                block_hash.as_ref(),
+            ),
             format_args!("BLOCK REFCOUNT: {}", block_hash),
         )
     }
 
     fn get_any_chunk_hash_by_height_shard(
         &self,
+
         height: BlockHeight,
         shard_id: ShardId,
     ) -> Result<ChunkHash, Error> {
@@ -1009,6 +1047,7 @@ impl ChainStoreAccess for ChainStore {
     /// Note that this function is different from get_outgoing_receipts_for_shard, see comments there
     fn get_outgoing_receipts(
         &self,
+
         prev_block_hash: &CryptoHash,
         shard_id: ShardId,
     ) -> Result<Arc<Vec<Receipt>>, Error> {
@@ -1024,6 +1063,7 @@ impl ChainStoreAccess for ChainStore {
 
     fn get_incoming_receipts(
         &self,
+
         block_hash: &CryptoHash,
         shard_id: ShardId,
     ) -> Result<Arc<Vec<ReceiptProof>>, Error> {
@@ -1038,19 +1078,33 @@ impl ChainStoreAccess for ChainStore {
     }
 
     fn get_blocks_to_catchup(&self, hash: &CryptoHash) -> Result<Vec<CryptoHash>, Error> {
-        Ok(self.store.get_ser(DBCol::BlocksToCatchup, hash.as_ref())?.unwrap_or_default())
+        match self.temp {
+            Temperature::Hot => Ok(self
+                .store
+                .get_ser(Temperature::Hot, DBCol::BlocksToCatchup, hash.as_ref())?
+                .unwrap_or_default()),
+            // _ => Ok(Vec::new())
+        }
     }
 
     fn is_block_challenged(&self, hash: &CryptoHash) -> Result<bool, Error> {
-        Ok(self.store.get_ser(DBCol::ChallengedBlocks, hash.as_ref())?.unwrap_or_default())
+        Ok(self
+            .store
+            .get_ser(self.temp, DBCol::ChallengedBlocks, hash.as_ref())?
+            .unwrap_or_default())
     }
 
     fn is_invalid_chunk(
         &self,
+
         chunk_hash: &ChunkHash,
     ) -> Result<Option<Arc<EncodedShardChunk>>, Error> {
-        self.read_with_cache(DBCol::InvalidChunks, &self.invalid_chunks, chunk_hash.as_ref())
-            .map_err(|err| err.into())
+        match self.temp {
+            Temperature::Hot => self
+                .read_with_cache(DBCol::InvalidChunks, &self.invalid_chunks, chunk_hash.as_ref())
+                .map_err(|err| err.into()),
+            // _ => Ok(None)
+        }
     }
 
     fn get_shard_id_for_receipt_id(&self, receipt_id: &CryptoHash) -> Result<ShardId, Error> {
@@ -1066,6 +1120,7 @@ impl ChainStoreAccess for ChainStore {
 
     fn get_transaction(
         &self,
+
         tx_hash: &CryptoHash,
     ) -> Result<Option<Arc<SignedTransaction>>, Error> {
         self.read_with_cache(DBCol::Transactions, &self.transactions, tx_hash.as_ref())
@@ -1083,6 +1138,7 @@ impl ChainStoreAccess for ChainStore {
 
     fn get_block_merkle_tree(
         &self,
+
         block_hash: &CryptoHash,
     ) -> Result<Arc<PartialMerkleTree>, Error> {
         option_to_not_found(
@@ -2065,6 +2121,7 @@ impl<'a> ChainStoreUpdate<'a> {
                     // If the block is on a fork, we delete the state that's the result of applying this block
                     for shard_uid in shard_uids_to_gc {
                         let trie_changes = self.store().get_ser(
+                            Temperature::Hot,
                             DBCol::TrieChanges,
                             &get_block_shard_uid(&block_hash, &shard_uid),
                         )?;
@@ -2082,6 +2139,7 @@ impl<'a> ChainStoreUpdate<'a> {
                     // If the block is on canonical chain, we delete the state that's before applying this block
                     for shard_uid in shard_uids_to_gc {
                         let trie_changes = self.store().get_ser(
+                            Temperature::Hot,
                             DBCol::TrieChanges,
                             &get_block_shard_uid(&block_hash, &shard_uid),
                         )?;
@@ -2150,7 +2208,7 @@ impl<'a> ChainStoreUpdate<'a> {
         let stored_state_changes: Vec<Box<[u8]>> = self
             .chain_store
             .store()
-            .iter_prefix(DBCol::StateChanges, storage_key.as_ref())
+            .iter_prefix(Temperature::Hot, DBCol::StateChanges, storage_key.as_ref())
             .map(|item| item.map(|(key, _)| key))
             .collect::<io::Result<Vec<_>>>()?;
         for key in stored_state_changes {
@@ -2875,6 +2933,7 @@ impl<'a> ChainStoreUpdate<'a> {
         }
         for (col, mut gc_count) in self.chain_store_cache_update.gc_count.clone().drain() {
             if let Ok(Some(value)) = self.store().get_ser::<GCCount>(
+                Temperature::Hot,
                 DBCol::GCCount,
                 &col.try_to_vec().expect("Failed to serialize DBCol"),
             ) {
@@ -3023,7 +3082,7 @@ mod tests {
     use near_primitives::utils::index_to_bytes;
     use near_primitives::validator_signer::InMemoryValidatorSigner;
     use near_store::test_utils::create_test_store;
-    use near_store::DBCol;
+    use near_store::{DBCol, Temperature};
 
     use crate::store::{ChainStoreAccess, GCMode};
     use crate::store_validator::StoreValidator;
@@ -3328,6 +3387,7 @@ mod tests {
                         .store()
                         .store
                         .get_ser::<GCCount>(
+                            Temperature::Hot,
                             DBCol::GCCount,
                             &col.try_to_vec().expect("Failed to serialize DBCol")
                         )
@@ -3340,6 +3400,7 @@ mod tests {
                         .store()
                         .store
                         .get_ser::<GCCount>(
+                            Temperature::Hot,
                             DBCol::GCCount,
                             &col.try_to_vec().expect("Failed to serialize DBCol")
                         )
@@ -3550,6 +3611,7 @@ mod tests {
                 genesis.clone(),
                 chain.runtime_adapter.clone(),
                 chain.store().store().clone(),
+                Temperature::Hot,
                 false,
             );
             store_validator.validate();

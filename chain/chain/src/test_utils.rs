@@ -300,7 +300,9 @@ impl KeyValueRuntime {
         if headers_cache.get(hash).is_some() {
             return Ok(Some(headers_cache.get(hash).unwrap().clone()));
         }
-        if let Some(result) = self.store.get_ser(DBCol::BlockHeader, hash.as_ref())? {
+        if let Some(result) =
+            self.store.get_ser(Temperature::Hot, DBCol::BlockHeader, hash.as_ref())?
+        {
             headers_cache.insert(*hash, result);
             return Ok(Some(headers_cache.get(hash).unwrap().clone()));
         }
@@ -1423,7 +1425,9 @@ pub fn display_chain(me: &Option<AccountId>, chain: &mut Chain, tail: bool) {
         head.last_block_hash
     );
     let mut headers = vec![];
-    for (key, _) in chain_store.store().clone().iter(DBCol::BlockHeader).map(Result::unwrap) {
+    for (key, _) in
+        chain_store.store().iter(Temperature::Hot, DBCol::BlockHeader).map(Result::unwrap)
+    {
         let header = chain_store
             .get_block_header(&CryptoHash::try_from(key.as_ref()).unwrap())
             .unwrap()

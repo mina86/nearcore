@@ -25,37 +25,44 @@ pub type TrieUpdates = BTreeMap<Vec<u8>, TrieKeyValueUpdate>;
 /// Provides a way to access Storage and record changes with future commit.
 pub struct TrieUpdate {
     pub trie: Rc<Trie>,
+    temp: crate::Temperature,
     root: CryptoHash,
     committed: RawStateChanges,
     prospective: TrieUpdates,
 }
 
 pub enum TrieUpdateValuePtr<'a> {
-    HashAndSize(&'a Trie, u32, CryptoHash),
-    MemoryRef(&'a Vec<u8>),
+    HashAndSize { trie: &'a Trie, temp: crate::Temperature, length: u32, hash: CryptoHash },
+    MemoryRef { value: &'a Vec<u8> },
 }
 
 impl<'a> TrieUpdateValuePtr<'a> {
     pub fn len(&self) -> u32 {
         match self {
-            TrieUpdateValuePtr::MemoryRef(value) => value.len() as u32,
-            TrieUpdateValuePtr::HashAndSize(_, length, _) => *length,
+            TrieUpdateValuePtr::MemoryRef { value } => value.len() as u32,
+            TrieUpdateValuePtr::HashAndSize { length, .. } => *length,
         }
     }
 
     pub fn deref_value(&self) -> Result<Vec<u8>, StorageError> {
         match self {
-            TrieUpdateValuePtr::MemoryRef(value) => Ok((*value).clone()),
-            TrieUpdateValuePtr::HashAndSize(trie, _, hash) => {
-                trie.storage.retrieve_raw_bytes(hash).map(|bytes| bytes.to_vec())
+            TrieUpdateValuePtr::MemoryRef { value } => Ok((*value).clone()),
+            TrieUpdateValuePtr::HashAndSize { trie, temp, hash, .. } => {
+                trie.storage.retrieve_raw_bytes(*temp, hash).map(|bytes| bytes.to_vec())
             }
         }
     }
 }
 
 impl TrieUpdate {
-    pub fn new(trie: Rc<Trie>, root: CryptoHash) -> Self {
-        TrieUpdate { trie, root, committed: Default::default(), prospective: Default::default() }
+    pub fn new(trie: Rc<Trie>, temp: crate::Temperature, root: CryptoHash) -> Self {
+        TrieUpdate {
+            trie,
+            temp,
+            root,
+            committed: Default::default(),
+            prospective: Default::default(),
+        }
     }
 
     pub fn trie(&self) -> &Trie {
@@ -72,20 +79,28 @@ impl TrieUpdate {
             }
         }
 
-        self.trie.get(&self.root, &key)
+        self.trie.get(self.temp, &self.root, &key)
     }
 
     pub fn get_ref(&self, key: &TrieKey) -> Result<Option<TrieUpdateValuePtr<'_>>, StorageError> {
         let key = key.to_vec();
         if let Some(key_value) = self.prospective.get(&key) {
-            return Ok(key_value.value.as_ref().map(TrieUpdateValuePtr::MemoryRef));
+            return Ok(key_value
+                .value
+                .as_ref()
+                .map(|value| TrieUpdateValuePtr::MemoryRef { value }));
         } else if let Some(changes_with_trie_key) = self.committed.get(&key) {
             if let Some(RawStateChange { data, .. }) = changes_with_trie_key.changes.last() {
-                return Ok(data.as_ref().map(TrieUpdateValuePtr::MemoryRef));
+                return Ok(data.as_ref().map(|value| TrieUpdateValuePtr::MemoryRef { value }));
             }
         }
-        self.trie.get_ref(&self.root, &key).map(|option| {
-            option.map(|(length, hash)| TrieUpdateValuePtr::HashAndSize(&self.trie, length, hash))
+        self.trie.get_ref(self.temp, &self.root, &key).map(|option| {
+            option.map(|(length, hash)| TrieUpdateValuePtr::HashAndSize {
+                trie: &self.trie,
+                temp: self.temp,
+                length,
+                hash,
+            })
         })
     }
 
@@ -116,11 +131,15 @@ impl TrieUpdate {
         self.prospective.clear();
     }
 
-    pub fn finalize(self) -> Result<(TrieChanges, Vec<RawStateChangesWithTrieKey>), StorageError> {
+    pub fn finalize(
+        self,
+        temp: crate::Temperature,
+    ) -> Result<(TrieChanges, Vec<RawStateChangesWithTrieKey>), StorageError> {
         assert!(self.prospective.is_empty(), "Finalize cannot be called with uncommitted changes.");
         let TrieUpdate { trie, root, committed, .. } = self;
         let mut state_changes = Vec::with_capacity(committed.len());
         let trie_changes = trie.update(
+            temp,
             &root,
             committed.into_iter().map(|(k, changes_with_trie_key)| {
                 let data = changes_with_trie_key
@@ -136,10 +155,11 @@ impl TrieUpdate {
         Ok((trie_changes, state_changes))
     }
 
-    pub fn finalize_genesis(self) -> Result<TrieChanges, StorageError> {
+    pub fn finalize_genesis(self, temp: crate::Temperature) -> Result<TrieChanges, StorageError> {
         assert!(self.prospective.is_empty(), "Finalize cannot be called with uncommitted changes.");
         let TrieUpdate { trie, root, committed, .. } = self;
         let trie_changes = trie.update(
+            temp,
             &root,
             committed.into_iter().map(|(k, changes_with_trie_key)| {
                 let data = changes_with_trie_key
@@ -223,7 +243,7 @@ impl<'a> TrieUpdateIterator<'a> {
         start: &[u8],
         end: Option<&[u8]>,
     ) -> Result<Self, StorageError> {
-        let mut trie_iter = state_update.trie.iter(&state_update.root)?;
+        let mut trie_iter = state_update.trie.iter(state_update.temp, &state_update.root)?;
         let mut start_offset = prefix.to_vec();
         start_offset.extend_from_slice(start);
         let end_offset = match end {
@@ -366,16 +386,18 @@ mod tests {
     fn trie() {
         let tries = create_tries_complex(SHARD_VERSION, 2);
         let root = CryptoHash::default();
-        let mut trie_update = tries.new_trie_update(COMPLEX_SHARD_UID, root);
+        let mut trie_update =
+            tries.new_trie_update(crate::Temperature::Hot, COMPLEX_SHARD_UID, root);
         trie_update.set(test_key(b"dog".to_vec()), b"puppy".to_vec());
         trie_update.set(test_key(b"dog2".to_vec()), b"puppy".to_vec());
         trie_update.set(test_key(b"xxx".to_vec()), b"puppy".to_vec());
         trie_update
             .commit(StateChangeCause::TransactionProcessing { tx_hash: CryptoHash::default() });
-        let trie_changes = trie_update.finalize().unwrap().0;
+        let trie_changes = trie_update.finalize(crate::Temperature::Hot).unwrap().0;
         let (store_update, new_root) = tries.apply_all(&trie_changes, COMPLEX_SHARD_UID);
         store_update.commit().unwrap();
-        let trie_update2 = tries.new_trie_update(COMPLEX_SHARD_UID, new_root);
+        let trie_update2 =
+            tries.new_trie_update(crate::Temperature::Hot, COMPLEX_SHARD_UID, new_root);
         assert_eq!(trie_update2.get(&test_key(b"dog".to_vec())), Ok(Some(b"puppy".to_vec())));
         let values = trie_update2
             .iter(&test_key(b"dog".to_vec()).to_vec())
@@ -393,40 +415,53 @@ mod tests {
         let tries = create_tries_complex(SHARD_VERSION, 2);
 
         // Delete non-existing element.
-        let mut trie_update = tries.new_trie_update(COMPLEX_SHARD_UID, CryptoHash::default());
+        let mut trie_update = tries.new_trie_update(
+            crate::Temperature::Hot,
+            COMPLEX_SHARD_UID,
+            CryptoHash::default(),
+        );
         trie_update.remove(test_key(b"dog".to_vec()));
         trie_update
             .commit(StateChangeCause::TransactionProcessing { tx_hash: CryptoHash::default() });
-        let trie_changes = trie_update.finalize().unwrap().0;
+        let trie_changes = trie_update.finalize(crate::Temperature::Hot).unwrap().0;
         let (store_update, new_root) = tries.apply_all(&trie_changes, COMPLEX_SHARD_UID);
         store_update.commit().unwrap();
         assert_eq!(new_root, CryptoHash::default());
 
         // Add and right away delete element.
-        let mut trie_update = tries.new_trie_update(COMPLEX_SHARD_UID, CryptoHash::default());
+        let mut trie_update = tries.new_trie_update(
+            crate::Temperature::Hot,
+            COMPLEX_SHARD_UID,
+            CryptoHash::default(),
+        );
         trie_update.set(test_key(b"dog".to_vec()), b"puppy".to_vec());
         trie_update.remove(test_key(b"dog".to_vec()));
         trie_update
             .commit(StateChangeCause::TransactionProcessing { tx_hash: CryptoHash::default() });
-        let trie_changes = trie_update.finalize().unwrap().0;
+        let trie_changes = trie_update.finalize(crate::Temperature::Hot).unwrap().0;
         let (store_update, new_root) = tries.apply_all(&trie_changes, COMPLEX_SHARD_UID);
         store_update.commit().unwrap();
         assert_eq!(new_root, CryptoHash::default());
 
         // Add, apply changes and then delete element.
-        let mut trie_update = tries.new_trie_update(COMPLEX_SHARD_UID, CryptoHash::default());
+        let mut trie_update = tries.new_trie_update(
+            crate::Temperature::Hot,
+            COMPLEX_SHARD_UID,
+            CryptoHash::default(),
+        );
         trie_update.set(test_key(b"dog".to_vec()), b"puppy".to_vec());
         trie_update
             .commit(StateChangeCause::TransactionProcessing { tx_hash: CryptoHash::default() });
-        let trie_changes = trie_update.finalize().unwrap().0;
+        let trie_changes = trie_update.finalize(crate::Temperature::Hot).unwrap().0;
         let (store_update, new_root) = tries.apply_all(&trie_changes, COMPLEX_SHARD_UID);
         store_update.commit().unwrap();
         assert_ne!(new_root, CryptoHash::default());
-        let mut trie_update = tries.new_trie_update(COMPLEX_SHARD_UID, new_root);
+        let mut trie_update =
+            tries.new_trie_update(crate::Temperature::Hot, COMPLEX_SHARD_UID, new_root);
         trie_update.remove(test_key(b"dog".to_vec()));
         trie_update
             .commit(StateChangeCause::TransactionProcessing { tx_hash: CryptoHash::default() });
-        let trie_changes = trie_update.finalize().unwrap().0;
+        let trie_changes = trie_update.finalize(crate::Temperature::Hot).unwrap().0;
         let (store_update, new_root) = tries.apply_all(&trie_changes, COMPLEX_SHARD_UID);
         store_update.commit().unwrap();
         assert_eq!(new_root, CryptoHash::default());
@@ -435,17 +470,21 @@ mod tests {
     #[test]
     fn trie_iter() {
         let tries = create_tries();
-        let mut trie_update =
-            tries.new_trie_update(ShardUId::single_shard(), CryptoHash::default());
+        let mut trie_update = tries.new_trie_update(
+            crate::Temperature::Hot,
+            ShardUId::single_shard(),
+            CryptoHash::default(),
+        );
         trie_update.set(test_key(b"dog".to_vec()), b"puppy".to_vec());
         trie_update.set(test_key(b"aaa".to_vec()), b"puppy".to_vec());
         trie_update
             .commit(StateChangeCause::TransactionProcessing { tx_hash: CryptoHash::default() });
-        let trie_changes = trie_update.finalize().unwrap().0;
+        let trie_changes = trie_update.finalize(crate::Temperature::Hot).unwrap().0;
         let (store_update, new_root) = tries.apply_all(&trie_changes, ShardUId::single_shard());
         store_update.commit().unwrap();
 
-        let mut trie_update = tries.new_trie_update(ShardUId::single_shard(), new_root);
+        let mut trie_update =
+            tries.new_trie_update(crate::Temperature::Hot, ShardUId::single_shard(), new_root);
         trie_update.set(test_key(b"dog2".to_vec()), b"puppy".to_vec());
         trie_update.set(test_key(b"xxx".to_vec()), b"puppy".to_vec());
 
@@ -462,14 +501,16 @@ mod tests {
             trie_update.iter(&test_key(b"dog".to_vec()).to_vec()).unwrap().collect();
         assert_eq!(values.unwrap(), vec![test_key(b"dog".to_vec()).to_vec()]);
 
-        let mut trie_update = tries.new_trie_update(ShardUId::single_shard(), new_root);
+        let mut trie_update =
+            tries.new_trie_update(crate::Temperature::Hot, ShardUId::single_shard(), new_root);
         trie_update.remove(test_key(b"dog".to_vec()));
 
         let values: Result<Vec<Vec<u8>>, _> =
             trie_update.iter(&test_key(b"dog".to_vec()).to_vec()).unwrap().collect();
         assert_eq!(values.unwrap().len(), 0);
 
-        let mut trie_update = tries.new_trie_update(ShardUId::single_shard(), new_root);
+        let mut trie_update =
+            tries.new_trie_update(crate::Temperature::Hot, ShardUId::single_shard(), new_root);
         trie_update.set(test_key(b"dog2".to_vec()), b"puppy".to_vec());
         trie_update
             .commit(StateChangeCause::TransactionProcessing { tx_hash: CryptoHash::default() });
@@ -479,7 +520,8 @@ mod tests {
             trie_update.iter(&test_key(b"dog".to_vec()).to_vec()).unwrap().collect();
         assert_eq!(values.unwrap(), vec![test_key(b"dog".to_vec()).to_vec()]);
 
-        let mut trie_update = tries.new_trie_update(ShardUId::single_shard(), new_root);
+        let mut trie_update =
+            tries.new_trie_update(crate::Temperature::Hot, ShardUId::single_shard(), new_root);
         trie_update.set(test_key(b"dog2".to_vec()), b"puppy".to_vec());
         trie_update
             .commit(StateChangeCause::TransactionProcessing { tx_hash: CryptoHash::default() });

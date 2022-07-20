@@ -13,7 +13,7 @@ use near_primitives::shard_layout::ShardUId;
 use near_primitives::types::{NumBlocks, NumShards, StateRoot};
 use near_primitives::validator_signer::InMemoryValidatorSigner;
 use near_store::test_utils::{create_test_store, gen_changes};
-use near_store::{ShardTries, StoreUpdate, Trie, WrappedTrieChanges};
+use near_store::{ShardTries, StoreUpdate, Temperature, Trie, WrappedTrieChanges};
 use rand::Rng;
 
 fn get_chain(num_shards: NumShards) -> Chain {
@@ -131,7 +131,9 @@ fn do_fork(
             let trie_changes_data = gen_changes(&mut rng, max_changes);
             let state_root = prev_state_roots[shard_id as usize];
             let trie = tries.get_trie_for_shard(shard_uid);
-            let trie_changes = trie.update(&state_root, trie_changes_data.iter().cloned()).unwrap();
+            let trie_changes = trie
+                .update(Temperature::Hot, &state_root, trie_changes_data.iter().cloned())
+                .unwrap();
             if verbose {
                 println!("state new {:?} {:?}", block.header().height(), trie_changes_data);
             }
@@ -234,7 +236,7 @@ fn gc_fork_common(simple_chains: Vec<SimpleChain>, max_changes: usize) {
 
         let mut state_root2 = state_roots2[simple_chain.from as usize];
         let state_root1 = states1[simple_chain.from as usize].1[shard_to_check_trie as usize];
-        assert!(trie1.iter(&state_root1).is_ok());
+        assert!(trie1.iter(Temperature::Hot, &state_root1).is_ok());
         assert_eq!(state_root1, state_root2);
 
         for i in start_index..start_index + simple_chain.length {
@@ -242,7 +244,11 @@ fn gc_fork_common(simple_chains: Vec<SimpleChain>, max_changes: usize) {
             let (block1, state_root1, changes1) = states1[i as usize].clone();
             // Apply to Trie 2 the same changes (changes1) as applied to Trie 1
             let trie_changes2 = trie2
-                .update(&state_root2, changes1[shard_to_check_trie as usize].iter().cloned())
+                .update(
+                    Temperature::Hot,
+                    &state_root2,
+                    changes1[shard_to_check_trie as usize].iter().cloned(),
+                )
                 .unwrap();
             // i == gc_height is the only height should be processed here
             if block1.header().height() > gc_height || i == gc_height {
@@ -290,15 +296,15 @@ fn gc_fork_common(simple_chains: Vec<SimpleChain>, max_changes: usize) {
                     block1.hash(),
                     block1.header().height()
                 );
-                assert!(trie1.iter(&state_root1).is_ok());
-                assert!(trie2.iter(&state_root1).is_ok());
+                assert!(trie1.iter(Temperature::Hot, &state_root1).is_ok());
+                assert!(trie2.iter(Temperature::Hot, &state_root1).is_ok());
                 let a = trie1
-                    .iter(&state_root1)
+                    .iter(Temperature::Hot, &state_root1)
                     .unwrap()
                     .map(|item| item.unwrap().0)
                     .collect::<Vec<_>>();
                 let b = trie2
-                    .iter(&state_root1)
+                    .iter(Temperature::Hot, &state_root1)
                     .unwrap()
                     .map(|item| item.unwrap().0)
                     .collect::<Vec<_>>();

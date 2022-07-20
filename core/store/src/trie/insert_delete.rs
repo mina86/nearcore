@@ -82,6 +82,7 @@ impl Trie {
     /// Insert while holding StorageHandles to NodesStorage is unsafe
     pub(crate) fn insert(
         &self,
+        temp: crate::Temperature,
         memory: &mut NodesStorage,
         node: StorageHandle,
         partial: NibbleSlice<'_>,
@@ -111,7 +112,7 @@ impl Trie {
                     // If the key ends here, store the value in branch's value.
                     if partial.is_empty() {
                         if let Some(value) = &existing_value {
-                            self.delete_value(memory, value)?;
+                            self.delete_value(temp, memory, value)?;
                         }
                         let value_handle = memory.store_value(value.take().unwrap());
                         let new_node =
@@ -126,7 +127,7 @@ impl Trie {
 
                         let child = match child {
                             Some(NodeHandle::Hash(hash)) => {
-                                self.move_node_to_mutable(memory, &hash)?
+                                self.move_node_to_mutable(temp, memory, &hash)?
                             }
                             Some(NodeHandle::InMemory(handle)) => handle,
                             None => memory.store(TrieNodeWithSize::empty()),
@@ -149,7 +150,7 @@ impl Trie {
                     let common_prefix = partial.common_prefix(&existing_key);
                     if common_prefix == existing_key.len() && common_prefix == partial.len() {
                         // Equivalent leaf.
-                        self.delete_value(memory, &existing_value)?;
+                        self.delete_value(temp, memory, &existing_value)?;
                         let value_handle = memory.store_value(value.take().unwrap());
                         let node = TrieNode::Leaf(key, ValueHandle::InMemory(value_handle));
                         let memory_usage = node.memory_usage_direct(memory);
@@ -245,7 +246,9 @@ impl Trie {
                         continue;
                     } else if common_prefix == existing_key.len() {
                         let child = match child {
-                            NodeHandle::Hash(hash) => self.move_node_to_mutable(memory, &hash)?,
+                            NodeHandle::Hash(hash) => {
+                                self.move_node_to_mutable(temp, memory, &hash)?
+                            }
                             NodeHandle::InMemory(handle) => handle,
                         };
                         let node = TrieNode::Extension(key, NodeHandle::InMemory(child));
@@ -310,6 +313,7 @@ impl Trie {
     /// While deleting keeps track of all the removed / updated nodes in `death_row`.
     pub(crate) fn delete(
         &self,
+        temp: crate::Temperature,
         memory: &mut NodesStorage,
         node: StorageHandle,
         partial: NibbleSlice<'_>,
@@ -329,7 +333,7 @@ impl Trie {
                 }
                 TrieNode::Leaf(key, value) => {
                     if NibbleSlice::from_encoded(&key).0 == partial {
-                        self.delete_value(memory, &value)?;
+                        self.delete_value(temp, memory, &value)?;
                         memory.store_at(handle, TrieNodeWithSize::empty());
                         break;
                     } else {
@@ -342,7 +346,7 @@ impl Trie {
                 TrieNode::Branch(mut children, value) => {
                     if partial.is_empty() {
                         if let Some(value) = &value {
-                            self.delete_value(memory, value)?;
+                            self.delete_value(temp, memory, value)?;
                         } else {
                         }
                         if children.iter().filter(|&x| x.is_some()).count() == 0 {
@@ -363,7 +367,7 @@ impl Trie {
                         if let Some(node_or_hash) = children[idx].take() {
                             let child = match node_or_hash {
                                 NodeHandle::Hash(hash) => {
-                                    self.move_node_to_mutable(memory, &hash)?
+                                    self.move_node_to_mutable(temp, memory, &hash)?
                                 }
                                 NodeHandle::InMemory(node) => node,
                             };
@@ -397,7 +401,9 @@ impl Trie {
                     };
                     if common_prefix == existing_len {
                         let child = match child {
-                            NodeHandle::Hash(hash) => self.move_node_to_mutable(memory, &hash)?,
+                            NodeHandle::Hash(hash) => {
+                                self.move_node_to_mutable(temp, memory, &hash)?
+                            }
                             NodeHandle::InMemory(node) => node,
                         };
                         Trie::calc_memory_usage_and_store(
@@ -420,12 +426,13 @@ impl Trie {
                 }
             }
         }
-        self.fix_nodes(memory, path)?;
+        self.fix_nodes(temp, memory, path)?;
         Ok(root_node)
     }
 
     fn fix_nodes(
         &self,
+        temp: crate::Temperature,
         memory: &mut NodesStorage,
         path: Vec<StorageHandle>,
     ) -> Result<(), StorageError> {
@@ -471,6 +478,7 @@ impl Trie {
                             .encoded_leftmost(1, false)
                             .into_vec();
                         self.fix_extension_node(
+                            temp,
                             memory,
                             handle,
                             key,
@@ -484,7 +492,7 @@ impl Trie {
                     }
                 }
                 TrieNode::Extension(key, child) => {
-                    self.fix_extension_node(memory, handle, key, child)?;
+                    self.fix_extension_node(temp, memory, handle, key, child)?;
                 }
             }
             child_memory_usage = memory.node_ref(handle).memory_usage;
@@ -494,13 +502,14 @@ impl Trie {
 
     fn fix_extension_node(
         &self,
+        temp: crate::Temperature,
         memory: &mut NodesStorage,
         handle: StorageHandle,
         key: Vec<u8>,
         child: NodeHandle,
     ) -> Result<(), StorageError> {
         let child = match child {
-            NodeHandle::Hash(hash) => self.move_node_to_mutable(memory, &hash)?,
+            NodeHandle::Hash(hash) => self.move_node_to_mutable(temp, memory, &hash)?,
             NodeHandle::InMemory(h) => h,
         };
         let TrieNodeWithSize { node, memory_usage } = memory.destroy(child);

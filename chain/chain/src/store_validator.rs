@@ -21,7 +21,7 @@ use near_primitives::types::chunk_extra::ChunkExtra;
 use near_primitives::types::{AccountId, BlockHeight, EpochId, GCCount};
 use near_primitives::utils::get_block_shard_id_rev;
 use near_store::db::refcount;
-use near_store::{DBCol, Store, TrieChanges};
+use near_store::{DBCol, Store, Temperature, TrieChanges};
 use validate::StoreValidatorError;
 
 use crate::RuntimeAdapter;
@@ -83,6 +83,7 @@ pub struct StoreValidator {
     config: GenesisConfig,
     runtime_adapter: Arc<dyn RuntimeAdapter>,
     store: Store,
+    temp: Temperature,
     inner: StoreValidatorCache,
     timeout: Option<u64>,
     start_time: Instant,
@@ -98,13 +99,15 @@ impl StoreValidator {
         config: GenesisConfig,
         runtime_adapter: Arc<dyn RuntimeAdapter>,
         store: Store,
+        temp: Temperature,
         is_archival: bool,
     ) -> Self {
         StoreValidator {
             me,
             config,
             runtime_adapter,
-            store: store,
+            store,
+            temp,
             inner: StoreValidatorCache::new(),
             timeout: None,
             start_time: Clock::instant(),
@@ -146,7 +149,7 @@ impl StoreValidator {
         self.errors.push(ErrorMessage { key: to_string(&key), col: to_string(&col), err })
     }
     fn validate_col(&mut self, col: DBCol) -> Result<(), StoreValidatorError> {
-        for item in self.store.clone().iter_raw_bytes(col) {
+        for item in self.store.clone().iter_raw_bytes(self.temp, col) {
             let (key, value) = item?;
             let key_ref = key.as_ref();
             let value_ref = value.as_ref();
@@ -418,6 +421,7 @@ impl StoreValidator {
 #[cfg(test)]
 mod tests {
     use near_store::test_utils::create_test_store;
+    use near_store::Temperature;
 
     use crate::test_utils::KeyValueRuntime;
     use crate::{Chain, ChainGenesis, ChainStoreAccess, DoomslugThresholdMode};
@@ -438,7 +442,7 @@ mod tests {
             true,
         )
         .unwrap();
-        (chain, StoreValidator::new(None, genesis, runtime_adapter, store, false))
+        (chain, StoreValidator::new(None, genesis, runtime_adapter, store, Temperature::Hot, false))
     }
 
     #[test]
