@@ -33,7 +33,6 @@ impl Crumb {
 }
 
 pub struct TrieIterator<'a> {
-    pub(crate) temp: crate::Temperature,
     trie: &'a Trie,
     trail: Vec<Crumb>,
     pub(crate) key_nibbles: Vec<u8>,
@@ -53,19 +52,14 @@ pub struct TrieTraversalItem {
 impl<'a> TrieIterator<'a> {
     #![allow(clippy::new_ret_no_self)]
     /// Create a new iterator.
-    pub fn new(
-        trie: &'a Trie,
-        temp: crate::Temperature,
-        root: &CryptoHash,
-    ) -> Result<Self, StorageError> {
+    pub fn new(trie: &'a Trie, root: &CryptoHash) -> Result<Self, StorageError> {
         let mut r = TrieIterator {
-            temp,
             trie,
             trail: Vec::with_capacity(8),
             key_nibbles: Vec::with_capacity(64),
             root: *root,
         };
-        let node = trie.retrieve_node(temp, root)?;
+        let node = trie.retrieve_node(root)?;
         r.descend_into_node(node);
         Ok(r)
     }
@@ -84,7 +78,7 @@ impl<'a> TrieIterator<'a> {
         self.key_nibbles.clear();
         let mut hash = self.root;
         loop {
-            let node = self.trie.retrieve_node(self.temp, &hash)?;
+            let node = self.trie.retrieve_node(&hash)?;
             self.trail.push(Crumb { status: CrumbStatus::Entering, node });
             let Crumb { status, node } = self.trail.last_mut().unwrap();
             match &node.node {
@@ -285,13 +279,13 @@ impl<'a> TrieIterator<'a> {
                     if self.key_nibbles[prefix..] >= path_end[prefix..] {
                         break;
                     }
-                    let node = self.trie.retrieve_node(self.temp, &hash)?;
+                    let node = self.trie.retrieve_node(&hash)?;
                     self.descend_into_node(node);
                     nodes_list.push(TrieTraversalItem { hash, key: None });
                 }
                 IterStep::Continue => {}
                 IterStep::Value(hash) => {
-                    self.trie.storage.retrieve_raw_bytes(self.temp, &hash)?;
+                    self.trie.storage.retrieve_raw_bytes(&hash)?;
                     nodes_list.push(TrieTraversalItem {
                         hash,
                         key: self.has_value().then(|| self.key()),
@@ -319,7 +313,7 @@ impl<'a> Iterator for TrieIterator<'a> {
                 IterStep::PopTrail => {
                     self.trail.pop();
                 }
-                IterStep::Descend(hash) => match self.trie.retrieve_node(self.temp, &hash) {
+                IterStep::Descend(hash) => match self.trie.retrieve_node(&hash) {
                     Ok(node) => self.descend_into_node(node),
                     Err(e) => return Some(Err(e)),
                 },
@@ -328,7 +322,7 @@ impl<'a> Iterator for TrieIterator<'a> {
                     return Some(
                         self.trie
                             .storage
-                            .retrieve_raw_bytes(self.temp, &hash)
+                            .retrieve_raw_bytes(&hash)
                             .map(|value| (self.key(), value.to_vec())),
                     )
                 }
@@ -360,7 +354,7 @@ mod tests {
         for _ in 0..100 {
             let tries = create_tries_complex(1, 2);
             let shard_uid = ShardUId { version: 1, shard_id: 0 };
-            let trie = tries.get_trie_for_shard(shard_uid);
+            let trie = tries.get_trie_for_shard(crate::Temperature::Hot, shard_uid);
             let trie_changes = gen_changes(&mut rng, 10);
             let trie_changes = simplify_changes(&trie_changes);
 
@@ -374,11 +368,7 @@ mod tests {
                 test_populate_trie(&tries, &Trie::empty_root(), shard_uid, trie_changes.clone());
 
             {
-                let result1: Vec<_> = trie
-                    .iter(crate::Temperature::Hot, &state_root)
-                    .unwrap()
-                    .map(Result::unwrap)
-                    .collect();
+                let result1: Vec<_> = trie.iter(&state_root).unwrap().map(Result::unwrap).collect();
                 let result2: Vec<_> = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                 assert_eq!(result1, result2);
             }
@@ -420,7 +410,7 @@ mod tests {
         let path_begin_nibbles: Vec<_> = NibbleSlice::new(path_begin).iter().collect();
         let path_end_nibbles: Vec<_> = NibbleSlice::new(path_end).iter().collect();
         let result1 = trie
-            .iter(crate::Temperature::Hot, state_root)
+            .iter(state_root)
             .unwrap()
             .get_trie_items(&path_begin_nibbles, &path_end_nibbles)
             .unwrap();
@@ -431,11 +421,8 @@ mod tests {
         assert_eq!(result1, result2);
 
         // test when path_end ends in [16]
-        let result1 = trie
-            .iter(crate::Temperature::Hot, state_root)
-            .unwrap()
-            .get_trie_items(&path_begin_nibbles, &[16u8])
-            .unwrap();
+        let result1 =
+            trie.iter(state_root).unwrap().get_trie_items(&path_begin_nibbles, &[16u8]).unwrap();
         let result2: Vec<_> =
             map.range(path_begin.to_vec()..).map(|(k, v)| (k.clone(), v.clone())).collect();
         assert_eq!(result1, result2);
@@ -447,7 +434,7 @@ mod tests {
         state_root: &CryptoHash,
         seek_key: &[u8],
     ) {
-        let mut iterator = trie.iter(crate::Temperature::Hot, state_root).unwrap();
+        let mut iterator = trie.iter(state_root).unwrap();
         iterator.seek(&seek_key).unwrap();
         let result1: Vec<_> = iterator.map(Result::unwrap).take(5).collect();
         let result2: Vec<_> =
@@ -460,7 +447,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         for _ in 0..100 {
             let tries = create_tries();
-            let trie = tries.get_trie_for_shard(ShardUId::single_shard());
+            let trie = tries.get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard());
             let trie_changes = gen_changes(&mut rng, 10);
             let trie_changes = simplify_changes(&trie_changes);
             let state_root = test_populate_trie(
@@ -469,7 +456,7 @@ mod tests {
                 ShardUId::single_shard(),
                 trie_changes.clone(),
             );
-            let mut iterator = trie.iter(crate::Temperature::Hot, &state_root).unwrap();
+            let mut iterator = trie.iter(&state_root).unwrap();
             loop {
                 let iter_step = match iterator.iter_step() {
                     Some(iter_step) => iter_step,
@@ -483,12 +470,10 @@ mod tests {
                     IterStep::PopTrail => {
                         iterator.trail.pop();
                     }
-                    IterStep::Descend(hash) => {
-                        match iterator.trie.retrieve_node(crate::Temperature::Hot, &hash) {
-                            Ok(node) => iterator.descend_into_node(node),
-                            Err(e) => panic!("Unexpected error: {}", e),
-                        }
-                    }
+                    IterStep::Descend(hash) => match iterator.trie.retrieve_node(&hash) {
+                        Ok(node) => iterator.descend_into_node(node),
+                        Err(e) => panic!("Unexpected error: {}", e),
+                    },
                     _ => {}
                 }
             }

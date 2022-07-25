@@ -657,7 +657,7 @@ mod tests {
         let store = opener.open();
         let ptr = (&*store.storage) as *const (dyn Database + 'static);
         let rocksdb = unsafe { &*(ptr as *const RocksDB) };
-        assert_eq!(store.get(DBCol::State, &[1]).unwrap(), None);
+        assert_eq!(store.get(crate::Temperature::Hot, DBCol::State, &[1]).unwrap(), None);
         {
             let mut store_update = store.store_update();
             store_update.increment_refcount(DBCol::State, &[1], &[1]);
@@ -668,7 +668,7 @@ mod tests {
             store_update.increment_refcount(DBCol::State, &[1], &[1]);
             store_update.commit().unwrap();
         }
-        assert_eq!(store.get(DBCol::State, &[1]).unwrap(), Some(vec![1]));
+        assert_eq!(store.get(crate::Temperature::Hot, DBCol::State, &[1]).unwrap(), Some(vec![1]));
         assert_eq!(
             rocksdb.get_raw_bytes(DBCol::State, &[1]).unwrap(),
             Some(vec![1, 2, 0, 0, 0, 0, 0, 0, 0])
@@ -678,7 +678,7 @@ mod tests {
             store_update.decrement_refcount(DBCol::State, &[1]);
             store_update.commit().unwrap();
         }
-        assert_eq!(store.get(DBCol::State, &[1]).unwrap(), Some(vec![1]));
+        assert_eq!(store.get(crate::Temperature::Hot, DBCol::State, &[1]).unwrap(), Some(vec![1]));
         assert_eq!(
             rocksdb.get_raw_bytes(DBCol::State, &[1]).unwrap(),
             Some(vec![1, 1, 0, 0, 0, 0, 0, 0, 0])
@@ -689,7 +689,7 @@ mod tests {
             store_update.commit().unwrap();
         }
         // Refcount goes to 0 -> get() returns None
-        assert_eq!(store.get(DBCol::State, &[1]).unwrap(), None);
+        assert_eq!(store.get(crate::Temperature::Hot, DBCol::State, &[1]).unwrap(), None);
         // Internally there is an empty value
         assert_eq!(rocksdb.get_raw_bytes(DBCol::State, &[1]).unwrap(), Some(vec![]));
 
@@ -704,11 +704,11 @@ mod tests {
             // empty values.
             rocksdb.db.compact_range_cf(cf, none, none);
             assert_eq!(rocksdb.get_raw_bytes(DBCol::State, &[1]).unwrap(), Some(vec![]));
-            assert_eq!(store.get(DBCol::State, &[1]).unwrap(), None);
+            assert_eq!(store.get(crate::Temperature::Hot, DBCol::State, &[1]).unwrap(), None);
 
             rocksdb.db.compact_range_cf(cf, none, none);
             assert_eq!(rocksdb.get_raw_bytes(DBCol::State, &[1]).unwrap(), None);
-            assert_eq!(store.get(DBCol::State, &[1]).unwrap(), None);
+            assert_eq!(store.get(crate::Temperature::Hot, DBCol::State, &[1]).unwrap(), None);
         }
     }
 

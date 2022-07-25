@@ -33,11 +33,7 @@ impl IncompletePartialStorage {
 }
 
 impl TrieStorage for IncompletePartialStorage {
-    fn retrieve_raw_bytes(
-        &self,
-        _temp: crate::Temperature,
-        hash: &CryptoHash,
-    ) -> Result<Arc<[u8]>, StorageError> {
+    fn retrieve_raw_bytes(&self, hash: &CryptoHash) -> Result<Arc<[u8]>, StorageError> {
         let result = self
             .recorded_storage
             .get(hash)
@@ -98,7 +94,7 @@ fn test_reads_with_incomplete_storage() {
     for _ in 0..50 {
         let tries = create_tries_complex(1, 2);
         let shard_uid = ShardUId { version: 1, shard_id: 0 };
-        let trie = tries.get_trie_for_shard(shard_uid);
+        let trie = tries.get_trie_for_shard(crate::Temperature::Hot, shard_uid);
         let trie = Rc::new(trie);
         let mut state_root = Trie::empty_root();
         let trie_changes = gen_changes(&mut rng, 20);
@@ -111,15 +107,14 @@ fn test_reads_with_incomplete_storage() {
         {
             let (key, _) = trie_changes.choose(&mut rng).unwrap();
             println!("Testing lookup {:?}", key);
-            let lookup_test = |trie: Rc<Trie>| -> Result<_, StorageError> {
-                trie.get(crate::Temperature::Hot, &state_root, key)
-            };
+            let lookup_test =
+                |trie: Rc<Trie>| -> Result<_, StorageError> { trie.get(&state_root, key) };
             test_incomplete_storage(Rc::clone(&trie), lookup_test);
         }
         {
             println!("Testing TrieIterator over whole trie");
             let trie_records = |trie: Rc<Trie>| -> Result<_, StorageError> {
-                let iterator = trie.iter(crate::Temperature::Hot, &state_root)?;
+                let iterator = trie.iter(&state_root)?;
                 iterator.collect::<Result<Vec<_>, _>>()
             };
             test_incomplete_storage(Rc::clone(&trie), trie_records);
@@ -129,7 +124,7 @@ fn test_reads_with_incomplete_storage() {
             let key_prefix = &key[0..rng.gen_range(0, key.len() + 1)];
             println!("Testing TrieUpdateIterator over prefix {:?}", key_prefix);
             let trie_update_keys = |trie: Rc<Trie>| -> Result<_, StorageError> {
-                let trie_update = TrieUpdate::new(trie, crate::Temperature::Hot, state_root);
+                let trie_update = TrieUpdate::new(trie, state_root);
                 let keys = trie_update.iter(key_prefix)?.collect::<Result<Vec<_>, _>>()?;
                 Ok(keys)
             };
@@ -151,7 +146,7 @@ mod nodes_counter_tests {
     fn create_trie(items: &[(Vec<u8>, Option<Vec<u8>>)]) -> (Rc<Trie>, CryptoHash) {
         let tries = create_tries();
         let shard_uid = ShardUId { version: 1, shard_id: 0 };
-        let trie = tries.get_trie_for_shard(shard_uid);
+        let trie = tries.get_trie_for_shard(crate::Temperature::Hot, shard_uid);
         let trie = Rc::new(trie);
         let state_root = Trie::empty_root();
         let trie_changes = simplify_changes(&items);
@@ -169,7 +164,7 @@ mod nodes_counter_tests {
             .iter()
             .map(|(key, value)| {
                 let initial_count = trie.get_trie_nodes_count().db_reads;
-                let got_value = trie.get(crate::Temperature::Hot, &state_root, key).unwrap();
+                let got_value = trie.get(&state_root, key).unwrap();
                 assert_eq!(*value, got_value);
                 trie.get_trie_nodes_count().db_reads - initial_count
             })
@@ -247,13 +242,14 @@ mod caching_storage_tests {
         let shard_uid = ShardUId::single_shard();
         let store = create_store_with_values(&values, shard_uid);
         let trie_cache = TrieCache::new();
-        let trie_caching_storage = TrieCachingStorage::new(store, trie_cache.clone(), shard_uid);
+        let trie_caching_storage =
+            TrieCachingStorage::new(store, crate::Temperature::Hot, trie_cache.clone(), shard_uid);
         let key = hash(&value);
         assert_eq!(trie_cache.get(&key), None);
 
         for _ in 0..2 {
             let count_before = trie_caching_storage.get_trie_nodes_count();
-            let result = trie_caching_storage.retrieve_raw_bytes(crate::Temperature::Hot, &key);
+            let result = trie_caching_storage.retrieve_raw_bytes(&key);
             let count_delta = trie_caching_storage.get_trie_nodes_count() - count_before;
             assert_eq!(result.unwrap().as_ref(), value);
             assert_eq!(count_delta.db_reads, 1);
@@ -267,11 +263,12 @@ mod caching_storage_tests {
     fn test_retrieve_error() {
         let shard_uid = ShardUId::single_shard();
         let store = create_test_store();
-        let trie_caching_storage = TrieCachingStorage::new(store, TrieCache::new(), shard_uid);
+        let trie_caching_storage =
+            TrieCachingStorage::new(store, crate::Temperature::Hot, TrieCache::new(), shard_uid);
         let value = vec![1u8];
         let key = hash(&value);
 
-        let result = trie_caching_storage.retrieve_raw_bytes(crate::Temperature::Hot, &key);
+        let result = trie_caching_storage.retrieve_raw_bytes(&key);
         assert_matches!(result, Err(StorageError::StorageInconsistentState(_)));
     }
 
@@ -283,14 +280,15 @@ mod caching_storage_tests {
         let shard_uid = ShardUId::single_shard();
         let store = create_store_with_values(&values, shard_uid);
         let trie_cache = TrieCache::new();
-        let trie_caching_storage = TrieCachingStorage::new(store, trie_cache.clone(), shard_uid);
+        let trie_caching_storage =
+            TrieCachingStorage::new(store, crate::Temperature::Hot, trie_cache.clone(), shard_uid);
         let key = hash(&value);
 
         trie_caching_storage.set_mode(TrieCacheMode::CachingChunk);
-        let _ = trie_caching_storage.retrieve_raw_bytes(crate::Temperature::Hot, &key);
+        let _ = trie_caching_storage.retrieve_raw_bytes(&key);
 
         let count_before = trie_caching_storage.get_trie_nodes_count();
-        let result = trie_caching_storage.retrieve_raw_bytes(crate::Temperature::Hot, &key);
+        let result = trie_caching_storage.retrieve_raw_bytes(&key);
         let count_delta = trie_caching_storage.get_trie_nodes_count() - count_before;
         assert_eq!(trie_cache.get(&key), None);
         assert_eq!(result.unwrap().as_ref(), value);
@@ -305,7 +303,8 @@ mod caching_storage_tests {
         let shard_uid = ShardUId::single_shard();
         let store = create_store_with_values(&values, shard_uid);
         let trie_cache = TrieCache::new();
-        let trie_caching_storage = TrieCachingStorage::new(store, trie_cache.clone(), shard_uid);
+        let trie_caching_storage =
+            TrieCachingStorage::new(store, crate::Temperature::Hot, trie_cache.clone(), shard_uid);
         let value = &values[0];
         let key = hash(&value);
 
@@ -313,14 +312,14 @@ mod caching_storage_tests {
         assert_eq!(trie_cache.get(&key), None);
 
         // Because we are in the CachingShard mode, item should be placed into shard cache.
-        let result = trie_caching_storage.retrieve_raw_bytes(crate::Temperature::Hot, &key);
+        let result = trie_caching_storage.retrieve_raw_bytes(&key);
         assert_eq!(result.unwrap().as_ref(), value);
 
         // Move to CachingChunk mode. Retrieval should increment the counter, because it is the first time we accessed
         // item while caching chunk.
         trie_caching_storage.set_mode(TrieCacheMode::CachingChunk);
         let count_before = trie_caching_storage.get_trie_nodes_count();
-        let result = trie_caching_storage.retrieve_raw_bytes(crate::Temperature::Hot, &key);
+        let result = trie_caching_storage.retrieve_raw_bytes(&key);
         let count_delta = trie_caching_storage.get_trie_nodes_count() - count_before;
         assert_eq!(result.unwrap().as_ref(), value);
         assert_eq!(count_delta.db_reads, 1);
@@ -328,7 +327,7 @@ mod caching_storage_tests {
 
         // After previous retrieval, item must be copied to chunk cache. Retrieval shouldn't increment the counter.
         let count_before = trie_caching_storage.get_trie_nodes_count();
-        let result = trie_caching_storage.retrieve_raw_bytes(crate::Temperature::Hot, &key);
+        let result = trie_caching_storage.retrieve_raw_bytes(&key);
         let count_delta = trie_caching_storage.get_trie_nodes_count() - count_before;
         assert_eq!(result.unwrap().as_ref(), value);
         assert_eq!(count_delta.db_reads, 0);
@@ -338,7 +337,7 @@ mod caching_storage_tests {
         // dropped only when trie caching storage is dropped.
         trie_caching_storage.set_mode(TrieCacheMode::CachingShard);
         let count_before = trie_caching_storage.get_trie_nodes_count();
-        let result = trie_caching_storage.retrieve_raw_bytes(crate::Temperature::Hot, &key);
+        let result = trie_caching_storage.retrieve_raw_bytes(&key);
         let count_delta = trie_caching_storage.get_trie_nodes_count() - count_before;
         assert_eq!(result.unwrap().as_ref(), value);
         assert_eq!(count_delta.db_reads, 0);
@@ -353,26 +352,26 @@ mod caching_storage_tests {
         let shard_uid = ShardUId::single_shard();
         let store = create_store_with_values(&values, shard_uid);
         let trie_cache = TrieCache::with_capacity(shard_cache_size);
-        let trie_caching_storage = TrieCachingStorage::new(store, trie_cache.clone(), shard_uid);
+        let trie_caching_storage =
+            TrieCachingStorage::new(store, crate::Temperature::Hot, trie_cache.clone(), shard_uid);
 
         let value = &values[0];
         let key = hash(&value);
 
         trie_caching_storage.set_mode(TrieCacheMode::CachingChunk);
-        let result = trie_caching_storage.retrieve_raw_bytes(crate::Temperature::Hot, &key);
+        let result = trie_caching_storage.retrieve_raw_bytes(&key);
         assert_eq!(result.unwrap().as_ref(), value);
 
         trie_caching_storage.set_mode(TrieCacheMode::CachingShard);
         values[1..].iter().for_each(|value| {
-            let result =
-                trie_caching_storage.retrieve_raw_bytes(crate::Temperature::Hot, &hash(value));
+            let result = trie_caching_storage.retrieve_raw_bytes(&hash(value));
             assert_eq!(result.unwrap().as_ref(), value);
         });
 
         // Check that the first element gets evicted, but the counter is not incremented.
         assert_eq!(trie_cache.get(&key), None);
         let count_before = trie_caching_storage.get_trie_nodes_count();
-        let result = trie_caching_storage.retrieve_raw_bytes(crate::Temperature::Hot, &key);
+        let result = trie_caching_storage.retrieve_raw_bytes(&key);
         let count_delta = trie_caching_storage.get_trie_nodes_count() - count_before;
         assert_eq!(result.unwrap().as_ref(), value);
         assert_eq!(count_delta.db_reads, 0);

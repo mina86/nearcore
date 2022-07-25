@@ -62,11 +62,7 @@ pub trait TrieStorage {
     /// Get bytes of a serialized TrieNode.
     /// # Errors
     /// StorageError if the storage fails internally or the hash is not present.
-    fn retrieve_raw_bytes(
-        &self,
-        temp: crate::Temperature,
-        hash: &CryptoHash,
-    ) -> Result<Arc<[u8]>, StorageError>;
+    fn retrieve_raw_bytes(&self, hash: &CryptoHash) -> Result<Arc<[u8]>, StorageError>;
 
     fn as_caching_storage(&self) -> Option<&TrieCachingStorage> {
         None
@@ -88,23 +84,20 @@ pub trait TrieStorage {
 /// TODO (#6316): implement proper nodes counting logic as in TrieCachingStorage
 pub struct TrieRecordingStorage {
     pub(crate) store: Store,
+    pub(crate) temp: crate::Temperature,
     pub(crate) shard_uid: ShardUId,
     pub(crate) recorded: RefCell<HashMap<CryptoHash, Vec<u8>>>,
 }
 
 impl TrieStorage for TrieRecordingStorage {
-    fn retrieve_raw_bytes(
-        &self,
-        temp: crate::Temperature,
-        hash: &CryptoHash,
-    ) -> Result<Arc<[u8]>, StorageError> {
+    fn retrieve_raw_bytes(&self, hash: &CryptoHash) -> Result<Arc<[u8]>, StorageError> {
         if let Some(val) = self.recorded.borrow().get(hash) {
             return Ok(val.as_slice().into());
         }
         let key = TrieCachingStorage::get_key_from_shard_uid_and_hash(self.shard_uid, hash);
         let val = self
             .store
-            .get(temp, DBCol::State, key.as_ref())
+            .get(self.temp, DBCol::State, key.as_ref())
             .map_err(|_| StorageError::StorageInternalError)?;
         if let Some(val) = val {
             self.recorded.borrow_mut().insert(*hash, val.clone());
@@ -131,11 +124,7 @@ pub struct TrieMemoryPartialStorage {
 }
 
 impl TrieStorage for TrieMemoryPartialStorage {
-    fn retrieve_raw_bytes(
-        &self,
-        _temp: crate::Temperature,
-        hash: &CryptoHash,
-    ) -> Result<Arc<[u8]>, StorageError> {
+    fn retrieve_raw_bytes(&self, hash: &CryptoHash) -> Result<Arc<[u8]>, StorageError> {
         let result = self
             .recorded_storage
             .get(hash)
@@ -172,6 +161,7 @@ pub(crate) const TRIE_LIMIT_CACHED_VALUE_SIZE: usize = 1000;
 
 pub struct TrieCachingStorage {
     pub(crate) store: Store,
+    pub(crate) temp: crate::Temperature,
     pub(crate) shard_uid: ShardUId,
 
     /// Caches ever requested items for the shard `shard_uid`. Used to speed up DB operations, presence of any item is
@@ -194,9 +184,15 @@ pub struct TrieCachingStorage {
 }
 
 impl TrieCachingStorage {
-    pub fn new(store: Store, shard_cache: TrieCache, shard_uid: ShardUId) -> TrieCachingStorage {
+    pub fn new(
+        store: Store,
+        temp: crate::Temperature,
+        shard_cache: TrieCache,
+        shard_uid: ShardUId,
+    ) -> TrieCachingStorage {
         TrieCachingStorage {
             store,
+            temp,
             shard_uid,
             shard_cache,
             cache_mode: Cell::new(TrieCacheMode::CachingShard),
@@ -242,11 +238,7 @@ impl TrieCachingStorage {
 }
 
 impl TrieStorage for TrieCachingStorage {
-    fn retrieve_raw_bytes(
-        &self,
-        temp: crate::Temperature,
-        hash: &CryptoHash,
-    ) -> Result<Arc<[u8]>, StorageError> {
+    fn retrieve_raw_bytes(&self, hash: &CryptoHash) -> Result<Arc<[u8]>, StorageError> {
         // Try to get value from chunk cache containing nodes with cheaper access. We can do it for any `TrieCacheMode`,
         // because we charge for reading nodes only when `CachingChunk` mode is enabled anyway.
         if let Some(val) = self.chunk_cache.borrow_mut().get(hash) {
@@ -267,7 +259,7 @@ impl TrieStorage for TrieCachingStorage {
                 let key = Self::get_key_from_shard_uid_and_hash(self.shard_uid, hash);
                 let val = self
                     .store
-                    .get(temp, DBCol::State, key.as_ref())
+                    .get(self.temp, DBCol::State, key.as_ref())
                     .map_err(|_| StorageError::StorageInternalError)?
                     .ok_or_else(|| {
                         StorageError::StorageInconsistentState("Trie node missing".to_string())

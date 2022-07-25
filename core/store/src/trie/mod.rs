@@ -479,6 +479,7 @@ impl Trie {
             self.storage.as_caching_storage().expect("Storage should be TrieCachingStorage");
         let storage = TrieRecordingStorage {
             store: storage.store.clone(),
+            temp: storage.temp,
             shard_uid: storage.shard_uid,
             recorded: RefCell::new(Default::default()),
         };
@@ -515,9 +516,7 @@ impl Trie {
         }
         let TrieNodeWithSize { node, memory_usage } = match handle {
             NodeHandle::InMemory(h) => memory.node_ref(h).clone(),
-            NodeHandle::Hash(h) => {
-                self.retrieve_node(crate::Temperature::Hot, &h).expect("storage failure")
-            }
+            NodeHandle::Hash(h) => self.retrieve_node(&h).expect("storage failure"),
         };
 
         let mut memory_usage_naive = node.memory_usage_direct(memory);
@@ -555,13 +554,12 @@ impl Trie {
 
     fn delete_value(
         &self,
-        temp: crate::Temperature,
         memory: &mut NodesStorage,
         value: &ValueHandle,
     ) -> Result<(), StorageError> {
         match value {
             ValueHandle::HashAndSize(_, hash) => {
-                let bytes = self.storage.retrieve_raw_bytes(temp, hash)?;
+                let bytes = self.storage.retrieve_raw_bytes(hash)?;
                 memory.refcount_changes.entry(*hash).or_insert_with(|| (bytes.to_vec(), 0)).1 -= 1;
             }
             ValueHandle::InMemory(_) => {
@@ -573,14 +571,13 @@ impl Trie {
 
     fn move_node_to_mutable(
         &self,
-        temp: crate::Temperature,
         memory: &mut NodesStorage,
         hash: &CryptoHash,
     ) -> Result<StorageHandle, StorageError> {
         if *hash == Trie::empty_root() {
             return Ok(memory.store(TrieNodeWithSize::empty()));
         }
-        let bytes = self.storage.retrieve_raw_bytes(temp, hash)?;
+        let bytes = self.storage.retrieve_raw_bytes(hash)?;
         match RawTrieNodeWithSize::decode(&bytes) {
             Ok(value) => {
                 let result = memory.store(TrieNodeWithSize::from_raw(value));
@@ -594,15 +591,11 @@ impl Trie {
         }
     }
 
-    fn retrieve_node(
-        &self,
-        temp: crate::Temperature,
-        hash: &CryptoHash,
-    ) -> Result<TrieNodeWithSize, StorageError> {
+    fn retrieve_node(&self, hash: &CryptoHash) -> Result<TrieNodeWithSize, StorageError> {
         if *hash == Trie::empty_root() {
             return Ok(TrieNodeWithSize::empty());
         }
-        let bytes = self.storage.retrieve_raw_bytes(temp, hash)?;
+        let bytes = self.storage.retrieve_raw_bytes(hash)?;
         match RawTrieNodeWithSize::decode(&bytes) {
             Ok(value) => Ok(TrieNodeWithSize::from_raw(value)),
             Err(_) => Err(StorageError::StorageInconsistentState(format!(
@@ -612,15 +605,11 @@ impl Trie {
         }
     }
 
-    pub fn retrieve_root_node(
-        &self,
-        temp: crate::Temperature,
-        root: &StateRoot,
-    ) -> Result<StateRootNode, StorageError> {
+    pub fn retrieve_root_node(&self, root: &StateRoot) -> Result<StateRootNode, StorageError> {
         if *root == Trie::empty_root() {
             return Ok(StateRootNode::empty());
         }
-        let data = self.storage.retrieve_raw_bytes(temp, root)?;
+        let data = self.storage.retrieve_raw_bytes(root)?;
         match RawTrieNodeWithSize::decode(&data) {
             Ok(value) => {
                 let memory_usage = TrieNodeWithSize::from_raw(value).memory_usage;
@@ -635,7 +624,6 @@ impl Trie {
 
     fn lookup(
         &self,
-        temp: crate::Temperature,
         root: &CryptoHash,
         mut key: NibbleSlice<'_>,
     ) -> Result<Option<(u32, CryptoHash)>, StorageError> {
@@ -645,7 +633,7 @@ impl Trie {
             if hash == Trie::empty_root() {
                 return Ok(None);
             }
-            let bytes = self.storage.retrieve_raw_bytes(temp, &hash)?;
+            let bytes = self.storage.retrieve_raw_bytes(&hash)?;
             let node = RawTrieNodeWithSize::decode(&bytes).map_err(|_| {
                 StorageError::StorageInconsistentState("RawTrieNode decode failed".to_string())
             })?;
@@ -691,23 +679,17 @@ impl Trie {
 
     pub fn get_ref(
         &self,
-        temp: crate::Temperature,
         root: &CryptoHash,
         key: &[u8],
     ) -> Result<Option<(u32, CryptoHash)>, StorageError> {
         let key = NibbleSlice::new(key);
-        self.lookup(temp, root, key)
+        self.lookup(root, key)
     }
 
-    pub fn get(
-        &self,
-        temp: crate::Temperature,
-        root: &CryptoHash,
-        key: &[u8],
-    ) -> Result<Option<Vec<u8>>, StorageError> {
-        match self.get_ref(temp, root, key)? {
+    pub fn get(&self, root: &CryptoHash, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        match self.get_ref(root, key)? {
             Some((_length, hash)) => {
-                self.storage.retrieve_raw_bytes(temp, &hash).map(|bytes| Some(bytes.to_vec()))
+                self.storage.retrieve_raw_bytes(&hash).map(|bytes| Some(bytes.to_vec()))
             }
             None => Ok(None),
         }
@@ -739,22 +721,17 @@ impl Trie {
         (insertions, deletions)
     }
 
-    pub fn update<I>(
-        &self,
-        temp: crate::Temperature,
-        root: &CryptoHash,
-        changes: I,
-    ) -> Result<TrieChanges, StorageError>
+    pub fn update<I>(&self, root: &CryptoHash, changes: I) -> Result<TrieChanges, StorageError>
     where
         I: Iterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
     {
         let mut memory = NodesStorage::new();
-        let mut root_node = self.move_node_to_mutable(temp, &mut memory, root)?;
+        let mut root_node = self.move_node_to_mutable(&mut memory, root)?;
         for (key, value) in changes {
             let key = NibbleSlice::new(&key);
             root_node = match value {
-                Some(arr) => self.insert(temp, &mut memory, root_node, key, arr)?,
-                None => self.delete(temp, &mut memory, root_node, key)?,
+                Some(arr) => self.insert(&mut memory, root_node, key, arr)?,
+                None => self.delete(&mut memory, root_node, key)?,
             };
         }
 
@@ -765,12 +742,8 @@ impl Trie {
         Trie::flatten_nodes(root, memory, root_node)
     }
 
-    pub fn iter<'a>(
-        &'a self,
-        temp: crate::Temperature,
-        root: &CryptoHash,
-    ) -> Result<TrieIterator<'a>, StorageError> {
-        TrieIterator::new(self, temp, root)
+    pub fn iter<'a>(&'a self, root: &CryptoHash) -> Result<TrieIterator<'a>, StorageError> {
+        TrieIterator::new(self, root)
     }
 
     pub fn get_trie_nodes_count(&self) -> TrieNodesCount {
@@ -825,16 +798,15 @@ mod tests {
         shard_uid: ShardUId,
         changes: TrieChanges,
     ) -> CryptoHash {
-        let trie = tries.get_trie_for_shard(shard_uid);
+        let trie = tries.get_trie_for_shard(crate::Temperature::Hot, shard_uid);
         let delete_changes: TrieChanges =
             changes.iter().map(|(key, _)| (key.clone(), None)).collect();
         let mut other_delete_changes = delete_changes.clone();
-        let trie_changes =
-            trie.update(crate::Temperature::Hot, root, other_delete_changes.drain(..)).unwrap();
+        let trie_changes = trie.update(root, other_delete_changes.drain(..)).unwrap();
         let (store_update, root) = tries.apply_all(&trie_changes, shard_uid);
         store_update.commit().unwrap();
         for (key, _) in delete_changes {
-            assert_eq!(trie.get(crate::Temperature::Hot, &root, &key), Ok(None));
+            assert_eq!(trie.get(&root, &key), Ok(None));
         }
         root
     }
@@ -867,9 +839,9 @@ mod tests {
         // test trie version > 0
         let tries = create_tries_complex(SHARD_VERSION, 2);
         let shard_uid = ShardUId { version: SHARD_VERSION, shard_id: 0 };
-        let trie = tries.get_trie_for_shard(shard_uid);
+        let trie = tries.get_trie_for_shard(crate::Temperature::Hot, shard_uid);
         let empty_root = Trie::empty_root();
-        assert_eq!(trie.get(crate::Temperature::Hot, &empty_root, &[122]), Ok(None));
+        assert_eq!(trie.get(&empty_root, &[122]), Ok(None));
         let changes = vec![
             (b"doge".to_vec(), Some(b"coin".to_vec())),
             (b"docu".to_vec(), Some(b"value".to_vec())),
@@ -881,17 +853,14 @@ mod tests {
         let root = test_populate_trie(&tries, &empty_root, shard_uid, changes.clone());
         let new_root = test_clear_trie(&tries, &root, shard_uid, changes);
         assert_eq!(new_root, empty_root);
-        assert_eq!(
-            trie.iter(crate::Temperature::Hot, &new_root).unwrap().fold(0, |acc, _| acc + 1),
-            0
-        );
+        assert_eq!(trie.iter(&new_root).unwrap().fold(0, |acc, _| acc + 1), 0);
     }
 
     #[test]
     fn test_trie_iter() {
         let tries = create_tries_complex(SHARD_VERSION, 2);
         let shard_uid = ShardUId { version: SHARD_VERSION, shard_id: 0 };
-        let trie = tries.get_trie_for_shard(shard_uid);
+        let trie = tries.get_trie_for_shard(crate::Temperature::Hot, shard_uid);
         let pairs = vec![
             (b"a".to_vec(), Some(b"111".to_vec())),
             (b"b".to_vec(), Some(b"222".to_vec())),
@@ -900,13 +869,13 @@ mod tests {
         ];
         let root = test_populate_trie(&tries, &Trie::empty_root(), shard_uid, pairs.clone());
         let mut iter_pairs = vec![];
-        for pair in trie.iter(crate::Temperature::Hot, &root).unwrap() {
+        for pair in trie.iter(&root).unwrap() {
             let (key, value) = pair.unwrap();
             iter_pairs.push((key, Some(value.to_vec())));
         }
         assert_eq!(pairs, iter_pairs);
 
-        let mut other_iter = trie.iter(crate::Temperature::Hot, &root).unwrap();
+        let mut other_iter = trie.iter(&root).unwrap();
         other_iter.seek(b"r").unwrap();
         assert_eq!(other_iter.next().unwrap().unwrap().0, b"x".to_vec());
     }
@@ -939,7 +908,7 @@ mod tests {
     #[test]
     fn test_trie_iter_seek_stop_at_extension() {
         let tries = create_tries();
-        let trie = tries.get_trie_for_shard(ShardUId::single_shard());
+        let trie = tries.get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard());
         let changes = vec![
             (vec![0, 116, 101, 115, 116], Some(vec![0])),
             (vec![2, 116, 101, 115, 116], Some(vec![0])),
@@ -960,7 +929,7 @@ mod tests {
         ];
         let root =
             test_populate_trie(&tries, &Trie::empty_root(), ShardUId::single_shard(), changes);
-        let mut iter = trie.iter(crate::Temperature::Hot, &root).unwrap();
+        let mut iter = trie.iter(&root).unwrap();
         iter.seek(&vec![0, 116, 101, 115, 116, 44]).unwrap();
         let mut pairs = vec![];
         for pair in iter {
@@ -984,7 +953,7 @@ mod tests {
     #[test]
     fn test_trie_remove_non_existent_key() {
         let tries = create_tries();
-        let trie = tries.get_trie_for_shard(ShardUId::single_shard());
+        let trie = tries.get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard());
         let initial = vec![
             (vec![99, 44, 100, 58, 58, 49], Some(vec![1])),
             (vec![99, 44, 100, 58, 58, 50], Some(vec![1])),
@@ -998,7 +967,7 @@ mod tests {
             (vec![99, 44, 100, 58, 58, 50, 52], None),
         ];
         let root = test_populate_trie(&tries, &root, ShardUId::single_shard(), changes);
-        for r in trie.iter(crate::Temperature::Hot, &root).unwrap() {
+        for r in trie.iter(&root).unwrap() {
             r.unwrap();
         }
     }
@@ -1006,7 +975,7 @@ mod tests {
     #[test]
     fn test_equal_leafs() {
         let tries = create_tries();
-        let trie = tries.get_trie_for_shard(ShardUId::single_shard());
+        let trie = tries.get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard());
         let initial = vec![
             (vec![1, 2, 3], Some(vec![1])),
             (vec![2, 2, 3], Some(vec![1])),
@@ -1014,13 +983,13 @@ mod tests {
         ];
         let root =
             test_populate_trie(&tries, &Trie::empty_root(), ShardUId::single_shard(), initial);
-        for r in trie.iter(crate::Temperature::Hot, &root).unwrap() {
+        for r in trie.iter(&root).unwrap() {
             r.unwrap();
         }
 
         let changes = vec![(vec![1, 2, 3], None)];
         let root = test_populate_trie(&tries, &root, ShardUId::single_shard(), changes);
-        for r in trie.iter(crate::Temperature::Hot, &root).unwrap() {
+        for r in trie.iter(&root).unwrap() {
             r.unwrap();
         }
     }
@@ -1030,20 +999,14 @@ mod tests {
         let mut rng = rand::thread_rng();
         for _ in 0..100 {
             let tries = create_tries();
-            let trie = tries.get_trie_for_shard(ShardUId::single_shard());
+            let trie = tries.get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard());
             let trie_changes = gen_changes(&mut rng, 20);
             let simplified_changes = simplify_changes(&trie_changes);
 
-            let trie_changes1 = trie
-                .update(crate::Temperature::Hot, &Trie::empty_root(), trie_changes.iter().cloned())
-                .unwrap();
-            let trie_changes2 = trie
-                .update(
-                    crate::Temperature::Hot,
-                    &Trie::empty_root(),
-                    simplified_changes.iter().cloned(),
-                )
-                .unwrap();
+            let trie_changes1 =
+                trie.update(&Trie::empty_root(), trie_changes.iter().cloned()).unwrap();
+            let trie_changes2 =
+                trie.update(&Trie::empty_root(), simplified_changes.iter().cloned()).unwrap();
             if trie_changes1.new_root != trie_changes2.new_root {
                 eprintln!("{:?}", trie_changes);
                 eprintln!("{:?}", simplified_changes);
@@ -1060,7 +1023,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         for _test_run in 0..10 {
             let tries = create_tries();
-            let trie = tries.get_trie_for_shard(ShardUId::single_shard());
+            let trie = tries.get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard());
             let trie_changes = gen_changes(&mut rng, 500);
 
             let state_root = test_populate_trie(
@@ -1071,7 +1034,7 @@ mod tests {
             );
             let queries = gen_changes(&mut rng, 500).into_iter().map(|(key, _)| key);
             for query in queries {
-                let mut iterator = trie.iter(crate::Temperature::Hot, &state_root).unwrap();
+                let mut iterator = trie.iter(&state_root).unwrap();
                 iterator.seek(&query).unwrap();
                 if let Some(Ok((key, _))) = iterator.next() {
                     assert!(key >= query);
@@ -1086,7 +1049,7 @@ mod tests {
         for _test_run in 0..10 {
             let num_iterations = rng.gen_range(1, 20);
             let tries = create_tries();
-            let trie = tries.get_trie_for_shard(ShardUId::single_shard());
+            let trie = tries.get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard());
             let mut state_root = Trie::empty_root();
             for _ in 0..num_iterations {
                 let trie_changes = gen_changes(&mut rng, 20);
@@ -1094,14 +1057,12 @@ mod tests {
                     test_populate_trie(&tries, &state_root, ShardUId::single_shard(), trie_changes);
                 println!(
                     "New memory_usage: {}",
-                    trie.retrieve_root_node(crate::Temperature::Hot, &state_root)
-                        .unwrap()
-                        .memory_usage
+                    trie.retrieve_root_node(&state_root).unwrap().memory_usage
                 );
             }
             {
                 let trie_changes = trie
-                    .iter(crate::Temperature::Hot, &state_root)
+                    .iter(&state_root)
                     .unwrap()
                     .map(|item| {
                         let (key, _) = item.unwrap();
@@ -1142,8 +1103,8 @@ mod tests {
         let root = test_populate_trie(&tries, &empty_root, ShardUId::single_shard(), changes);
 
         let tries2 = ShardTries::test(store, 1);
-        let trie2 = tries2.get_trie_for_shard(ShardUId::single_shard());
-        assert_eq!(trie2.get(crate::Temperature::Hot, &root, b"doge"), Ok(Some(b"coin".to_vec())));
+        let trie2 = tries2.get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard());
+        assert_eq!(trie2.get(&root, b"doge"), Ok(Some(b"coin".to_vec())));
     }
 
     // TODO: somehow also test that we don't record unnecessary nodes
@@ -1162,22 +1123,18 @@ mod tests {
         ];
         let root = test_populate_trie(&tries, &empty_root, ShardUId::single_shard(), changes);
 
-        let trie2 = tries.get_trie_for_shard(ShardUId::single_shard()).recording_reads();
-        trie2.get(crate::Temperature::Hot, &root, b"dog").unwrap();
-        trie2.get(crate::Temperature::Hot, &root, b"horse").unwrap();
+        let trie2 = tries
+            .get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard())
+            .recording_reads();
+        trie2.get(&root, b"dog").unwrap();
+        trie2.get(&root, b"horse").unwrap();
         let partial_storage = trie2.recorded_storage();
 
         let trie3 = Trie::from_recorded_storage(partial_storage.unwrap());
 
-        assert_eq!(trie3.get(crate::Temperature::Hot, &root, b"dog"), Ok(Some(b"puppy".to_vec())));
-        assert_eq!(
-            trie3.get(crate::Temperature::Hot, &root, b"horse"),
-            Ok(Some(b"stallion".to_vec()))
-        );
-        assert_eq!(
-            trie3.get(crate::Temperature::Hot, &root, b"doge"),
-            Err(StorageError::TrieNodeMissing)
-        );
+        assert_eq!(trie3.get(&root, b"dog"), Ok(Some(b"puppy".to_vec())));
+        assert_eq!(trie3.get(&root, b"horse"), Ok(Some(b"stallion".to_vec())));
+        assert_eq!(trie3.get(&root, b"doge"), Err(StorageError::TrieNodeMissing));
     }
 
     #[test]
@@ -1192,24 +1149,30 @@ mod tests {
         let root = test_populate_trie(&tries, &empty_root, ShardUId::single_shard(), changes);
         // Trie: extension -> branch -> 2 leaves
         {
-            let trie2 = tries.get_trie_for_shard(ShardUId::single_shard()).recording_reads();
-            trie2.get(crate::Temperature::Hot, &root, b"doge").unwrap();
+            let trie2 = tries
+                .get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard())
+                .recording_reads();
+            trie2.get(&root, b"doge").unwrap();
             // record extension, branch and one leaf with value, but not the other
             assert_eq!(trie2.recorded_storage().unwrap().nodes.0.len(), 4);
         }
 
         {
-            let trie2 = tries.get_trie_for_shard(ShardUId::single_shard()).recording_reads();
+            let trie2 = tries
+                .get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard())
+                .recording_reads();
             let updates = vec![(b"doge".to_vec(), None)];
-            trie2.update(crate::Temperature::Hot, &root, updates.into_iter()).unwrap();
+            trie2.update(&root, updates.into_iter()).unwrap();
             // record extension, branch and both leaves (one with value)
             assert_eq!(trie2.recorded_storage().unwrap().nodes.0.len(), 5);
         }
 
         {
-            let trie2 = tries.get_trie_for_shard(ShardUId::single_shard()).recording_reads();
+            let trie2 = tries
+                .get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard())
+                .recording_reads();
             let updates = vec![(b"dodo".to_vec(), Some(b"asdf".to_vec()))];
-            trie2.update(crate::Temperature::Hot, &root, updates.into_iter()).unwrap();
+            trie2.update(&root, updates.into_iter()).unwrap();
             // record extension and branch, but not leaves
             assert_eq!(trie2.recorded_storage().unwrap().nodes.0.len(), 2);
         }
@@ -1230,7 +1193,7 @@ mod tests {
         let store2 = create_test_store();
         store2.load_from_file(DBCol::State, &dir.path().join("test.bin")).unwrap();
         let tries2 = ShardTries::test(store2, 1);
-        let trie2 = tries2.get_trie_for_shard(ShardUId::single_shard());
-        assert_eq!(trie2.get(crate::Temperature::Hot, &root, b"doge").unwrap().unwrap(), b"coin");
+        let trie2 = tries2.get_trie_for_shard(crate::Temperature::Hot, ShardUId::single_shard());
+        assert_eq!(trie2.get(&root, b"doge").unwrap().unwrap(), b"coin");
     }
 }

@@ -36,14 +36,14 @@ pub fn test_populate_trie(
     shard_uid: ShardUId,
     changes: Vec<(Vec<u8>, Option<Vec<u8>>)>,
 ) -> CryptoHash {
-    let trie = tries.get_trie_for_shard(shard_uid);
+    let trie = tries.get_trie_for_shard(crate::Temperature::Hot, shard_uid);
     assert_eq!(trie.storage.as_caching_storage().unwrap().shard_uid.shard_id, 0);
-    let trie_changes = trie.update(crate::Temperature::Hot, root, changes.iter().cloned()).unwrap();
+    let trie_changes = trie.update(root, changes.iter().cloned()).unwrap();
     let (store_update, root) = tries.apply_all(&trie_changes, shard_uid);
     store_update.commit().unwrap();
     let deduped = simplify_changes(&changes);
     for (key, value) in deduped {
-        assert_eq!(trie.get(crate::Temperature::Hot, &root, &key), Ok(value));
+        assert_eq!(trie.get(&root, &key), Ok(value));
     }
     root
 }

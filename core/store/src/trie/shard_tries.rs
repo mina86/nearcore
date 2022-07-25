@@ -90,7 +90,7 @@ impl ShardTries {
         shard_uid: ShardUId,
         state_root: CryptoHash,
     ) -> TrieUpdate {
-        TrieUpdate::new(Rc::new(self.get_trie_for_shard(shard_uid)), temp, state_root)
+        TrieUpdate::new(Rc::new(self.get_trie_for_shard(temp, shard_uid)), state_root)
     }
 
     pub fn new_trie_update_view(
@@ -99,10 +99,15 @@ impl ShardTries {
         shard_uid: ShardUId,
         state_root: CryptoHash,
     ) -> TrieUpdate {
-        TrieUpdate::new(Rc::new(self.get_view_trie_for_shard(shard_uid)), temp, state_root)
+        TrieUpdate::new(Rc::new(self.get_view_trie_for_shard(temp, shard_uid)), state_root)
     }
 
-    fn get_trie_for_shard_internal(&self, shard_uid: ShardUId, is_view: bool) -> Trie {
+    fn get_trie_for_shard_internal(
+        &self,
+        temp: crate::Temperature,
+        shard_uid: ShardUId,
+        is_view: bool,
+    ) -> Trie {
         let caches_to_use = if is_view { &self.0.view_caches } else { &self.0.caches };
         let cache = {
             let mut caches = caches_to_use.write().expect(POISONED_LOCK_ERR);
@@ -111,16 +116,16 @@ impl ShardTries {
                 .or_insert_with(|| self.0.trie_cache_factory.create_cache(&shard_uid))
                 .clone()
         };
-        let store = Box::new(TrieCachingStorage::new(self.0.store.clone(), cache, shard_uid));
+        let store = Box::new(TrieCachingStorage::new(self.0.store.clone(), temp, cache, shard_uid));
         Trie::new(store)
     }
 
-    pub fn get_trie_for_shard(&self, shard_uid: ShardUId) -> Trie {
-        self.get_trie_for_shard_internal(shard_uid, false)
+    pub fn get_trie_for_shard(&self, temp: crate::Temperature, shard_uid: ShardUId) -> Trie {
+        self.get_trie_for_shard_internal(temp, shard_uid, false)
     }
 
-    pub fn get_view_trie_for_shard(&self, shard_uid: ShardUId) -> Trie {
-        self.get_trie_for_shard_internal(shard_uid, true)
+    pub fn get_view_trie_for_shard(&self, temp: crate::Temperature, shard_uid: ShardUId) -> Trie {
+        self.get_trie_for_shard_internal(temp, shard_uid, true)
     }
 
     pub fn get_store(&self) -> Store {
