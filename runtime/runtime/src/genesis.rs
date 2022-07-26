@@ -16,7 +16,7 @@ use near_primitives::{
 };
 use near_store::{
     get_account, get_received_data, set, set_access_key, set_account, set_code,
-    set_postponed_receipt, set_received_data, ShardTries, TrieUpdate,
+    set_postponed_receipt, set_received_data, ShardTries, Temperature, TrieUpdate,
 };
 
 use crate::config::RuntimeConfig;
@@ -227,9 +227,10 @@ impl GenesisStateApplier {
         delayed_receipts_indices: DelayedReceiptIndices,
         current_state_root: &mut StateRoot,
         tries: &mut ShardTries,
+        temp: Temperature,
         shard_uid: ShardUId,
     ) {
-        let mut state_update = tries.new_trie_update(shard_uid, *current_state_root);
+        let mut state_update = tries.new_trie_update(temp, shard_uid, *current_state_root);
 
         if delayed_receipts_indices != DelayedReceiptIndices::default() {
             set(&mut state_update, TrieKey::DelayedReceiptIndices, &delayed_receipts_indices);

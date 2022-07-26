@@ -578,9 +578,9 @@ pub(crate) fn trie_changes_chunk_extra_exists(
         );
     }
     // 4) Trie should exist for `shard_uid` and the root
-    let trie = sv.runtime_adapter.get_tries().get_trie_for_shard(*shard_uid);
+    let trie = sv.runtime_adapter.get_tries().get_trie_for_shard(sv.temp, *shard_uid);
     let trie_iterator = unwrap_or_err!(
-        TrieIterator::new(&trie, sv.temp, &new_root),
+        TrieIterator::new(&trie, &new_root),
         "Trie Node Missing for shard {:?} root {:?}",
         shard_uid,
         new_root

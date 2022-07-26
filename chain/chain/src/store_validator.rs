@@ -466,8 +466,8 @@ mod tests {
 
     #[test]
     fn test_db_corruption() {
-        let (chain, mut sv) = init();
-        let mut store_update = chain.store().store().store_update();
+        let (mut chain, mut sv) = init();
+        let mut store_update = chain.mut_store().chain_store().store().store_update();
         assert!(sv.validate_col(DBCol::TrieChanges).is_ok());
         store_update.set_ser::<Vec<u8>>(DBCol::TrieChanges, "567".as_ref(), &vec![123]).unwrap();
         store_update.commit().unwrap();
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_db_not_found() {
-        let (chain, mut sv) = init();
+        let (mut chain, mut sv) = init();
         let block = chain.get_block_by_height(0).unwrap();
         assert!(validate::block_header_exists(&mut sv, block.hash(), &block).is_ok());
         match validate::block_header_exists(&mut sv, &CryptoHash::default(), &block) {

@@ -43,7 +43,7 @@ use near_primitives::views::{
 };
 use near_store::test_utils::create_test_store;
 use near_store::{
-    DBCol, PartialStorage, ShardTries, Store, StoreUpdate, Trie, TrieChanges, WrappedTrieChanges,
+    DBCol, PartialStorage, ShardTries, Store, StoreUpdate, Temperature, Trie, TrieChanges, WrappedTrieChanges,
 };
 
 use crate::block_processing_utils::BlockNotInPoolError;
@@ -428,18 +428,20 @@ impl RuntimeAdapter for KeyValueRuntime {
 
     fn get_trie_for_shard(
         &self,
+        temp: Temperature,
         shard_id: ShardId,
         _block_hash: &CryptoHash,
     ) -> Result<Trie, Error> {
-        Ok(self.tries.get_trie_for_shard(ShardUId { version: 0, shard_id: shard_id as u32 }))
+        Ok(self.tries.get_trie_for_shard(temp, ShardUId { version: 0, shard_id: shard_id as u32 }))
     }
 
     fn get_view_trie_for_shard(
         &self,
+        temp: Temperature,
         shard_id: ShardId,
         _block_hash: &CryptoHash,
     ) -> Result<Trie, Error> {
-        Ok(self.tries.get_view_trie_for_shard(ShardUId { version: 0, shard_id: shard_id as u32 }))
+        Ok(self.tries.get_view_trie_for_shard(temp, ShardUId { version: 0, shard_id: shard_id as u32 }))
     }
 
     fn verify_block_vrf(
@@ -1415,7 +1417,7 @@ pub fn format_hash(h: CryptoHash) -> String {
 /// Displays chain from given store.
 pub fn display_chain(me: &Option<AccountId>, chain: &mut Chain, tail: bool) {
     let runtime_adapter = chain.runtime_adapter();
-    let chain_store = chain.mut_store();
+    let chain_store = chain.mut_store(Temperature::Hot);
     let head = chain_store.head().unwrap();
     debug!(
         "{:?} Chain head ({}): {} / {}",

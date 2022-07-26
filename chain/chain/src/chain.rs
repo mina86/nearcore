@@ -490,7 +490,7 @@ impl Chain {
         save_trie_changes: bool,
     ) -> Result<Chain, Error> {
         let (store, state_roots) = runtime_adapter.genesis_state();
-        let store = ChainStore::new(store, chain_genesis.height, save_trie_changes);
+        let store = ChainStore::new(store, temp, chain_genesis.height, save_trie_changes);
         let genesis_chunks = genesis_chunks(
             state_roots,
             runtime_adapter.num_shards(&EpochId::default())?,
@@ -2475,12 +2475,13 @@ impl Chain {
 
     pub fn get_state_response_header(
         &self,
+        temp: Temperature,
         shard_id: ShardId,
         sync_hash: CryptoHash,
     ) -> Result<ShardStateSyncResponseHeader, Error> {
         // Check cache
         let key = StateHeaderKey(shard_id, sync_hash).try_to_vec()?;
-        if let Ok(Some(header)) = self.store.store().get_ser(DBCol::StateHeaders, &key) {
+        if let Ok(Some(header)) = self.store.store().get_ser(temp, DBCol::StateHeaders, &key) {
             return Ok(header);
         }
 
@@ -2660,13 +2661,14 @@ impl Chain {
 
     pub fn get_state_response_part(
         &self,
+        temp: Temperature,
         shard_id: ShardId,
         part_id: u64,
         sync_hash: CryptoHash,
     ) -> Result<Vec<u8>, Error> {
         // Check cache
         let key = StatePartKey(sync_hash, shard_id, part_id).try_to_vec()?;
-        if let Ok(Some(state_part)) = self.store.store().get(DBCol::StateParts, &key) {
+        if let Ok(Some(state_part)) = self.store.store().get(temp, DBCol::StateParts, &key) {
             return Ok(state_part);
         }
 
@@ -4071,16 +4073,16 @@ impl Chain {
         Ok(None)
     }
 
-    /// Returns underlying ChainStore.
-    #[inline]
-    pub fn store(&self) -> &ChainStore {
-        &self.store
-    }
+    // /// Returns mutable ChainStore.
+    // #[inline]
+    // pub fn store(&'a mut self, temp: Temperature) -> ChainStoreReader<'a> {
+    //     ChainStoreReader::new(&self.store, temp)
+    // }
 
     /// Returns mutable ChainStore.
     #[inline]
-    pub fn mut_store(&mut self) -> &mut ChainStore {
-        &mut self.store
+    pub fn mut_store(&'a mut self, temp: Temperature) -> ChainStoreReader<'a> {
+        ChainStoreReader::new(&self.store, temp)
     }
 
     /// Returns underlying RuntimeAdapter.
